@@ -1,0 +1,106 @@
+# EFF-EFMI-Compatibility-Plugin v1.1.0
+
+🌐 **[English Documentation (README.EN.md)](./README.EN.md)**
+
+**《明日方舟：终末地》(Arknights: Endfield) DX11 模式下 EFF 与 EFMI (XXMI / 3DMigoto) 完美共存桥接插件 & 无菜单精简版 UID 隐藏工具**  
+**修复 EFF `Ins` 控制面板不弹出问题 · 彻底保护 73layol 菜单分辨率 (`res_width` / `res_height`) · 免冲突三层无感隐藏 UID**
+
+---
+
+## 🎯 解决的核心痛点
+
+当你在 **DX11 模式 (`-force-d3d11`)** 下通过 XXMI Launcher 启动游戏，同时使用 **EFMI (3DMigoto)** 角色 Mod 与 **[EFF](https://github.com/ssice-a/EFF)** 角色 Mod 时，原本会遇到三大冲突痛点，本插件一次性全部解决：
+
+1. **🛠️ 修复按 `Ins` 无法呼出 EFF 控制面板（底层线程静默崩溃）**
+   - **原版问题**：在挂载了 EFMI (`d3d11.dll`) 的 DX11 环境下按下 `Ins` 键时，`eff.dll` 的 UI 线程会调用 `CreateSwapChainForComposition` 创建 `604×640` 透明合成交换链并被 3DMigoto 包装为 `HackerSwapChain`。随后 `dcomp.dll` (`IDCompositionVisual::SetContent`) 查询微软内部接口 `{7652C85A-...}` 时拿到包装对象指针，触发 `0xC0000005` 内存访问冲突导致 EFF 面板线程直接静默退出，表现为**按 `Ins` 毫无反应、没有任何弹窗**。
+   - **修复效果**：本插件仅对 `eff.dll` 的导入表（IAT）进行精准隔离，在 `eff.dll` 专属 UI 线程上激活 3DMigoto 原生的 `hooking_quirk_protection` 直通通道，使 EFF 面板使用纯原生未包装交换链渲染，**按 `Ins` 秒弹 `EFF Mod 按键控制` 悬浮窗，且鼠标解锁 (`ClipCursor`) 正常生效**。
+
+2. **🖥️ 彻底根治 73layol 菜单（及使用 `res_width` / `res_height` 的 Mod UI）巨大化变形**
+   - **原版问题**：无论是旧版 `ApplepieManager` 的 `480×560` 悬浮窗，还是 EFF 的 `604×640` 面板，只要经过 3DMigoto 的 `Hooked_CreateSwapChainForComposition`，都会把 3DMigoto 全局分辨率变量 `res_width` / `res_height` 覆写成小窗口尺寸，导致 73layol 交互菜单（`Ctrl+K`）按错误分辨率进行 NDC 缩放而撑爆整个屏幕。
+   - **修复效果**：EFF 面板创建及任意拖拽缩放窗口大小时完全绕过 3DMigoto 交换链拦截，**`res_width` / `res_height` 永远保持游戏真实渲染分辨率（如 `3840×2160` / `2560×1440`），73layol 菜单比例 100% 正常**。
+
+3. **🛡️ 内置免冲突精简版三层 UID / 名片隐藏（替代 `ApplepieManager` 避免 `d3dcompiler_47.dll` 冲突）**
+   - **原版问题**：新版 `ApplepieManager` 与 EFF 均依赖游戏根目录同名的 `d3dcompiler_47.dll` 代理加载器，无法直接覆盖共存；旧版 `applepie_manager.dll` 则自带 `480×560` ImGui 交换链污染分辨率。
+   - **修复效果**：提取重构自 `zonemodAE/ApplepieManager` 的三层 IL2CPP 隐藏核心（`GameObject.SetActive` + `TMP_Text.set_text` + `GenerateTextMesh` 防单帧闪烁），**完全剥离自身菜单界面与 DX11 交换链，零帧率损耗**，直接由 EFF 自带的 `d3dcompiler_47.dll` 自动挂载加载，且不会被 `EFF-Mod-Manager` 更新或卸载时误删。
+
+---
+
+## 📦 安装方法（两步即用）
+
+> 💡 **共存前提说明**：
+> 1. 保持通过 **XXMI Launcher** 以 **DX11 模式**启动游戏（加载 EFMI），同时游戏根目录保留 EFF 安装好的 `d3dcompiler_47.dll` 与 `plugin\eff.dll`。
+> 2. **切勿对同一个角色同时启用 EFMI Mod 和 EFF Mod**（不同角色分别使用 EFMI 和 EFF 完全互不干扰）。
+> 3. 如果你的 `<游戏根目录>\plugin\` 下还留有旧版 **`applepie_manager.dll`**，请先将其移走或删除，避免旧版创建 `480×560` 交换链或重复 Hook。
+
+1. 前往 [Releases](https://github.com/BakaMai/EFF-EFMI-Compatibility-Plugin/releases) 下载最新压缩包（或直接取仓库内的 `plugin/hide_uid.dll` 与 `plugin/hide_uid.ini`）。
+2. 将 `hide_uid.dll` 和 `hide_uid.ini` 放入 **`<游戏根目录>\plugin\`** 文件夹（与 `eff.dll` 同级）即可：
+
+```text
+Arknights Endfield/                 (包含 Endfield.exe 的游戏根目录)
+├── d3dcompiler_47.dll              <-- EFF 自带的代理加载器（自动扫描加载 plugin\*.dll）
+└── plugin/
+    ├── eff.dll                     <-- EFF 核心插件
+    ├── eff.ini
+    ├── hide_uid.dll                <-- ✨ 本插件主程序
+    ├── hide_uid.ini                <-- ✨ 本插件配置文件
+    └── mods/                       <-- EFF 格式 Mod 存放目录
+```
+
+启动游戏后，`<游戏根目录>\plugin\hide_uid_log.txt` 会自动生成并记录 `[EFF-FIX]` 面板隔离状态与 UID 隐藏状态：
+- 游戏内按 **`Ins` (`Insert`)**：正常弹出 **`EFF Mod 按键控制`** 窗口（按 `Esc` 或再按 `Ins` 收起）。
+- 游戏内按 **`Ctrl + K`**：73layol 菜单尺寸与点击热区完全正常。
+
+---
+
+## ⚙️ 配置文件说明 (`plugin/hide_uid.ini`)
+
+使用记事本或任意文本编辑器打开 `plugin\hide_uid.ini` 即可按需开关各项功能（`1` = 开启，`0` = 关闭，修改后重启游戏生效）：
+
+| 分类 | 配置项 | 默认值 | 功能说明 |
+| :--- | :--- | :---: | :--- |
+| **水印 (`[uid]`)** | `hide_uid` | **`1`** | **隐藏** 画面右下角常驻 UID 水印 |
+| **水印 (`[uid]`)** | `hide_ping` | **`0`** | **保留显示** 右下角网络延迟 (Ping ms) |
+| **菜单 (`[uid]`)** | `hide_menu_uid` | **`1`** | **隐藏** ESC 菜单界面 UID (`ManagerNumber`) |
+| **菜单 (`[uid]`)** | `hide_menu_name` | **`0`** | **保留显示** ESC 菜单界面管理员昵称 (`ManagerName` / `WatchPanel`) |
+| **名片 (`[uid]`)** | `hide_card_uid` | **`1`** | **隐藏** 个人名片 / 好友名片页 UID (`PlayerUidTxt`) |
+| **名片 (`[uid]`)** | `hide_card_name` | **`1`** | **隐藏** 个人名片 / 好友名片页名字 (`PersonalInfoNode`) |
+| **共存修复 (`[eff]`)** | `fix_eff_panel` | **`1`** | **开启** EFF `Ins` 面板防崩溃隔离与 3DMigoto `res_width` / `res_height` 分辨率保护 |
+
+> 注：如果只想单独使用「EFF `Ins` 面板修复 + 73layol 菜单分辨率保护」而不需要隐藏任何 UID，只需把 `[uid]` 下的项全部设为 `0`、保留 `fix_eff_panel=1` 即可。
+
+---
+
+## 🔬 技术原理简述
+
+1. **为什么不直接全局 Hook `dxgi.dll`？**
+   3DMigoto (`EFMI\d3d11.dll`) 内部通过 Deviare (`cHookMgr`) 对 `IDXGIFactory2::CreateSwapChainForComposition` 安装了内联钩子，并在 `sort_out_swap_chain_device_mess` 中强制校验传入的 `ID3D11Device` 是否经过 `HackerDevice` 包装（若传入未包装设备且未走直通分支，3DMigoto 会直接触发 `DoubleBeepExit()` 强退游戏）。
+2. **零侵入线程级直通方案**：
+   3DMigoto 在所有 D3D11 / DXGI / 鼠标钩子入口处均内建了重入保护检查 `if (get_tls()->hooking_quirk_protection) return fnOrig(...);`。
+   本插件仅修改 `eff.dll` 自身的 PE 导入表（`D3D11CreateDevice` 与 `DCompositionCreateDevice`），完全不触碰 Unity 渲染主线程：
+   - 当玩家按下 `Ins` 触发 `eff.dll` 面板专属线程（`EiemControlPanel::Window::Run`）初始化图形设备时，插件通过指令特征校验自动定位当前进程中 3DMigoto 模块的 `tls_idx` 槽位；
+   - 先通过一次零副作用探测调用由 3DMigoto 自身的 CRT 分配器初始化该线程的 `TLS` 结构（确保线程退出 `DLL_THREAD_DETACH` 时堆释放完全一致），随后将该 UI 专用线程的 `hooking_quirk_protection` 置为 `1`；
+   - 此后该线程上的 `D3D11CreateDevice`、`CreateSwapChainForComposition`、`ClipCursor(nullptr)` 以及混合显卡笔记本 Optimus `Present` 全部走 3DMigoto 原生直通分支，既不生成 `HackerSwapChain`（彻底消除 `dcomp.dll` 崩溃），也绝不执行 `override_factory2_swap_chain`（彻底锁死保护 `res_width` / `res_height`）。
+
+---
+
+## 🛠️ 从源码编译
+
+仓库已内置完整的 `MinHook` C 源码，无任何外部第三方库依赖，支持 **Visual Studio (MSVC `cl.exe`)** 或 **[Zig](https://ziglang.org/) (`zig cc`)** 一键编译：
+
+```bat
+:: 在 x64 Native Tools Command Prompt for VS 或已配置 zig 的终端中运行：
+build.bat
+```
+
+编译产物输出至：`plugin\hide_uid.dll`
+
+---
+
+## 🙏 致谢与开源协议
+
+- **[ssice-a/EFF](https://github.com/ssice-a/EFF)**：Endfield 资源级 Mod 框架与 `d3dcompiler_47.dll` 插件加载生态。
+- **[zonemodAE/ApplepieManager](https://github.com/zonemodAE/ApplepieManager)**：三层 IL2CPP 文本节点隐藏思路与实现参考（`il2cpp_text_scanner.h`）。
+- **[bo3b/3Dmigoto](https://github.com/bo3b/3Dmigoto) & [SpectrumQT/EFMI](https://github.com/SpectrumQT/EFMI-Tools)**：3DMigoto / XXMI / EFMI 渲染框架。
+- **[TsudaKageyu/minhook](https://github.com/TsudaKageyu/minhook)**：轻量级 x86/x64 API Hook 库（BSD-2-Clause License）。
+
+本项目遵循上游衍生要求，采用 **[GNU Affero General Public License v3.0 (AGPL-3.0)](./LICENSE)** 开源发布。

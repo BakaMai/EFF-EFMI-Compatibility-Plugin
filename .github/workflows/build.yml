@@ -1,0 +1,38 @@
+name: Build Plugin
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC x64 Developer Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build hide_uid.dll
+        run: cmd /c build.bat
+
+      - name: Package Release Zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/plugin | Out-Null
+          Copy-Item plugin/hide_uid.dll dist/plugin/hide_uid.dll -Force
+          Copy-Item plugin/hide_uid.ini dist/plugin/hide_uid.ini -Force
+          Compress-Archive -Path dist/plugin -DestinationPath EFF-EFMI-Compatibility-Plugin.zip -Force
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EFF-EFMI-Compatibility-Plugin
+          path: EFF-EFMI-Compatibility-Plugin.zip

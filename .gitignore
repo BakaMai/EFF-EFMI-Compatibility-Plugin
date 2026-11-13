@@ -1,0 +1,9 @@
+*.obj
+*.exp
+*.lib
+*.pdb
+.vs/
+*.user
+*.suo
+*_log.txt
+release/
