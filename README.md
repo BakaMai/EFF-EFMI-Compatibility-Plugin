@@ -3,7 +3,7 @@
 🌐 **[English Documentation (README.EN.md)](./README.EN.md)**
 
 **《明日方舟：终末地》(Arknights: Endfield) DX11 模式下 EFF 与 EFMI (XXMI / 3DMigoto) 完美共存桥接插件 & 无菜单精简版 UID 隐藏工具**  
-**修复 EFF `Ins` 控制面板不弹出问题 · 彻底保护 73layol 菜单分辨率 (`res_width` / `res_height`) · 免冲突三层无感隐藏 UID**
+**修复 EFF `Ins` 控制面板不弹出问题 · 彻底保护 Mod GUI 菜单分辨率 (`res_width` / `res_height`) · 免冲突三层无感隐藏 UID**
 
 ---
 
@@ -12,12 +12,12 @@
 当你在 **DX11 模式 (`-force-d3d11`)** 下通过 XXMI Launcher 启动游戏，同时使用 **EFMI (3DMigoto)** 角色 Mod 与 **[EFF](https://github.com/ssice-a/EFF)** 角色 Mod 时，原本会遇到三大冲突痛点，本插件一次性全部解决：
 
 1. **🛠️ 修复按 `Ins` 无法呼出 EFF 控制面板（底层线程静默崩溃）**
-   - **原版问题**：在挂载了 EFMI (`d3d11.dll`) 的 DX11 环境下按下 `Ins` 键时，`eff.dll` 的 UI 线程会调用 `CreateSwapChainForComposition` 创建 `604×640` 透明合成交换链并被 3DMigoto 包装为 `HackerSwapChain`。随后 `dcomp.dll` (`IDCompositionVisual::SetContent`) 查询微软内部接口 `{7652C85A-...}` 时拿到包装对象指针，触发 `0xC0000005` 内存访问冲突导致 EFF 面板线程直接静默退出，表现为**按 `Ins` 毫无反应、没有任何弹窗**。
-   - **修复效果**：本插件仅对 `eff.dll` 的导入表（IAT）进行精准隔离，在 `eff.dll` 专属 UI 线程上激活 3DMigoto 原生的 `hooking_quirk_protection` 直通通道，使 EFF 面板使用纯原生未包装交换链渲染，**按 `Ins` 秒弹 `EFF Mod 按键控制` 悬浮窗，且鼠标解锁 (`ClipCursor`) 正常生效**。
+   - **原版问题**：在挂载了 EFMI (`d3d11.dll`) 的 DX11 环境下按下 `Ins` 键时，`eff.dll` 的 UI 线程创建 `604×640` 透明合成交换链时会被 3DMigoto 包装拦截，导致 `dcomp.dll` 合成阶段触发 `0xC0000005` 异常使 EFF 面板线程直接静默退出，表现为**按 `Ins` 毫无反应、没有任何弹窗**。
+   - **修复效果**：本插件对 `eff.dll` 面板专属线程进行隔离直通，**游戏内按 `Ins` 秒弹 `EFF Mod 按键控制` 悬浮窗，且鼠标解锁正常生效**。
 
-2. **🖥️ 彻底根治 73layol 菜单（及使用 `res_width` / `res_height` 的 Mod UI）巨大化变形**
-   - **原版问题**：无论是旧版 `ApplepieManager` 的 `480×560` 悬浮窗，还是 EFF 的 `604×640` 面板，只要经过 3DMigoto 的 `Hooked_CreateSwapChainForComposition`，都会把 3DMigoto 全局分辨率变量 `res_width` / `res_height` 覆写成小窗口尺寸，导致 73layol 交互菜单（`Ctrl+K`）按错误分辨率进行 NDC 缩放而撑爆整个屏幕。
-   - **修复效果**：EFF 面板创建及任意拖拽缩放窗口大小时完全绕过 3DMigoto 交换链拦截，**`res_width` / `res_height` 永远保持游戏真实渲染分辨率（如 `3840×2160` / `2560×1440`），73layol 菜单比例 100% 正常**。
+2. **🖥️ 彻底根治 Mod GUI 菜单（及使用 `res_width` / `res_height` 的 Mod UI）巨大化变形**
+   - **原版问题**：无论是旧版 `ApplepieManager` 的 `480×560` 悬浮窗，还是 EFF 的 `604×640` 面板，只要经过 3DMigoto 的交换链钩子，都会把 3DMigoto 全局分辨率变量 `res_width` / `res_height` 覆写成小窗口尺寸，导致游戏内各类 Mod GUI 菜单按错误分辨率缩放而撑爆整个屏幕。
+   - **修复效果**：EFF 面板创建及任意拖拽缩放窗口大小时完全绕过 3DMigoto 交换链拦截，**`res_width` / `res_height` 永远保持游戏真实渲染分辨率（如 `3840×2160` / `2560×1440`），Mod GUI 菜单比例 100% 正常**。
 
 3. **🛡️ 内置免冲突精简版三层 UID / 名片隐藏（替代 `ApplepieManager` 避免 `d3dcompiler_47.dll` 冲突）**
    - **原版问题**：新版 `ApplepieManager` 与 EFF 均依赖游戏根目录同名的 `d3dcompiler_47.dll` 代理加载器，无法直接覆盖共存；旧版 `applepie_manager.dll` 则自带 `480×560` ImGui 交换链污染分辨率。
@@ -48,7 +48,7 @@ Arknights Endfield/                 (包含 Endfield.exe 的游戏根目录)
 
 启动游戏后，`<游戏根目录>\plugin\hide_uid_log.txt` 会自动生成并记录 `[EFF-FIX]` 面板隔离状态与 UID 隐藏状态：
 - 游戏内按 **`Ins` (`Insert`)**：正常弹出 **`EFF Mod 按键控制`** 窗口（按 `Esc` 或再按 `Ins` 收起）。
-- 游戏内按 **`Ctrl + K`**：73layol 菜单尺寸与点击热区完全正常。
+- 游戏内呼出 **Mod GUI 菜单**（如 `Ctrl + K`）：菜单尺寸与点击热区完全正常。
 
 ---
 
@@ -66,20 +66,7 @@ Arknights Endfield/                 (包含 Endfield.exe 的游戏根目录)
 | **名片 (`[uid]`)** | `hide_card_name` | **`1`** | **隐藏** 个人名片 / 好友名片页名字 (`PersonalInfoNode`) |
 | **共存修复 (`[eff]`)** | `fix_eff_panel` | **`1`** | **开启** EFF `Ins` 面板防崩溃隔离与 3DMigoto `res_width` / `res_height` 分辨率保护 |
 
-> 注：如果只想单独使用「EFF `Ins` 面板修复 + 73layol 菜单分辨率保护」而不需要隐藏任何 UID，只需把 `[uid]` 下的项全部设为 `0`、保留 `fix_eff_panel=1` 即可。
-
----
-
-## 🔬 技术原理简述
-
-1. **为什么不直接全局 Hook `dxgi.dll`？**
-   3DMigoto (`EFMI\d3d11.dll`) 内部通过 Deviare (`cHookMgr`) 对 `IDXGIFactory2::CreateSwapChainForComposition` 安装了内联钩子，并在 `sort_out_swap_chain_device_mess` 中强制校验传入的 `ID3D11Device` 是否经过 `HackerDevice` 包装（若传入未包装设备且未走直通分支，3DMigoto 会直接触发 `DoubleBeepExit()` 强退游戏）。
-2. **零侵入线程级直通方案**：
-   3DMigoto 在所有 D3D11 / DXGI / 鼠标钩子入口处均内建了重入保护检查 `if (get_tls()->hooking_quirk_protection) return fnOrig(...);`。
-   本插件仅修改 `eff.dll` 自身的 PE 导入表（`D3D11CreateDevice` 与 `DCompositionCreateDevice`），完全不触碰 Unity 渲染主线程：
-   - 当玩家按下 `Ins` 触发 `eff.dll` 面板专属线程（`EiemControlPanel::Window::Run`）初始化图形设备时，插件通过指令特征校验自动定位当前进程中 3DMigoto 模块的 `tls_idx` 槽位；
-   - 先通过一次零副作用探测调用由 3DMigoto 自身的 CRT 分配器初始化该线程的 `TLS` 结构（确保线程退出 `DLL_THREAD_DETACH` 时堆释放完全一致），随后将该 UI 专用线程的 `hooking_quirk_protection` 置为 `1`；
-   - 此后该线程上的 `D3D11CreateDevice`、`CreateSwapChainForComposition`、`ClipCursor(nullptr)` 以及混合显卡笔记本 Optimus `Present` 全部走 3DMigoto 原生直通分支，既不生成 `HackerSwapChain`（彻底消除 `dcomp.dll` 崩溃），也绝不执行 `override_factory2_swap_chain`（彻底锁死保护 `res_width` / `res_height`）。
+> 注：如果只想单独使用「EFF `Ins` 面板修复 + Mod GUI 菜单分辨率保护」而不需要隐藏任何 UID，只需把 `[uid]` 下的项全部设为 `0`、保留 `fix_eff_panel=1` 即可。
 
 ---
 

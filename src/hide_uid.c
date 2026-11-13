@@ -9,8 +9,8 @@
 //      HackerSwapChain) by isolating eff.dll's dedicated UI thread via
 //      3DMigoto's native per-thread hooking_quirk_protection fast-path.
 //   2) Protects 3DMigoto's res_width / res_height from being overwritten by
-//      EFF's 604x640 DirectComposition SwapChain, preventing 73layol's in-game
-//      UI menus from blowing up in scale.
+//      EFF's 604x640 DirectComposition SwapChain, preventing in-game Mod GUI
+//      menus from blowing up in scale.
 //   3) Provides a zero-UI, zero-SwapChain 3-layer IL2CPP UID / Name hider
 //      derived from zonemodAE/ApplepieManager (GNU AGPL-3.0) without conflicting
 //      with EFF's d3dcompiler_47.dll proxy loader.
@@ -688,7 +688,7 @@ static int ResolveIL2CppExports(void) {
 //   (604x640, AlphaMode=PREMULTIPLIED) -> IDCompositionVisual::SetContent.
 //   3DMigoto intercepts both calls:
 //     1) Hooked_CreateSwapChainForComposition overwrites G->mResolutionInfo
-//        (res_width=604, res_height=640), breaking 73layol's UI menu scale.
+//        (res_width=604, res_height=640), breaking in-game Mod GUI menu scale.
 //     2) wrap_factory2_swap_chain returns HackerSwapChain*, whose QueryInterface
 //        returns HackerSwapChain* for dcomp.dll's internal CDXGISwapChain IID
 //        {7652C85A-...}, causing an immediate 0xC0000005 crash inside SetContent.

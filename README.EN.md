@@ -3,7 +3,7 @@
 🌐 **[中文说明文档 (README.md)](./README.md)**
 
 **Seamless DX11 Coexistence Bridge for EFF + EFMI (XXMI / 3DMigoto) & Headless UID Hider for *Arknights: Endfield***  
-**Fixes EFF `Ins` Control Panel Crash · Protects 3DMigoto `res_width` / `res_height` (73layol Menus) · Conflict-Free 3-Layer UID Hider**
+**Fixes EFF `Ins` Control Panel Crash · Protects 3DMigoto `res_width` / `res_height` (Mod GUI Menus) · Conflict-Free 3-Layer UID Hider**
 
 ---
 
@@ -12,12 +12,12 @@
 When running ***Arknights: Endfield*** in **DX11 mode (`-force-d3d11`)** via XXMI Launcher to use **EFMI (3DMigoto)** mods alongside **[EFF](https://github.com/ssice-a/EFF)** mods, three major compatibility issues arise. This lightweight companion plugin fixes all of them at once:
 
 1. **🛠️ Fixes EFF's `Ins` Control Panel Not Opening (Silent `dcomp.dll` Crash)**
-   - **The Problem**: Pressing `Ins` (`Insert`) causes `eff.dll`'s dedicated UI thread to create a `604×640` `DXGI_ALPHA_MODE_PREMULTIPLIED` composition swap chain (`CreateSwapChainForComposition`). 3DMigoto intercepts this call and wraps the swap chain in a `HackerSwapChain*`. When `dcomp.dll` (`IDCompositionVisual::SetContent`) queries Microsoft's private `CDXGISwapChain` interface (`{7652C85A-...}`), `HackerSwapChain::QueryInterface` returns the wrapper pointer instead of the native DXGI object, triggering an immediate `0xC0000005` access violation that silently kills EFF's UI thread.
-   - **The Fix**: Patches only `eff.dll`'s Import Address Table (IAT) and enables 3DMigoto's native per-thread `hooking_quirk_protection` passthrough on EFF's dedicated UI thread. EFF's popup window receives a pure unwrapped native swap chain, **opening the `EFF Mod 按键控制` window reliably on `Ins` with working cursor unlock (`ClipCursor`)**.
+   - **The Problem**: Pressing `Ins` (`Insert`) causes `eff.dll`'s UI thread to create a `604×640` DirectComposition swap chain that gets wrapped by 3DMigoto, triggering an immediate `0xC0000005` access violation inside `dcomp.dll` that silently terminates EFF's panel thread.
+   - **The Fix**: Isolates `eff.dll`'s dedicated UI thread so EFF's popup window renders on an unwrapped native swap chain, **opening the `EFF Mod 按键控制` window reliably on `Ins` with working cursor unlock**.
 
-2. **🖥️ Prevents 73layol Menus (and `res_width` / `res_height` Shaders) from Blowing Up in Size**
-   - **The Problem**: Whenever an overlay plugin (such as legacy `ApplepieManager`'s `480×560` panel or EFF's `604×640` panel) calls `CreateSwapChainForComposition` through 3DMigoto, `Hooked_CreateSwapChainForComposition` overwrites 3DMigoto's global `res_width` and `res_height` with the small popup dimensions. Any 3DMigoto UI shader relying on `res_width` / `res_height` (such as 73layol's interactive `Ctrl+K` mod menus) becomes massively oversized and unusable.
-   - **The Fix**: Because EFF's UI thread takes 3DMigoto's passthrough fast-path and this plugin itself creates zero windows or swap chains, **`res_width` and `res_height` remain locked to your true game resolution (e.g., `3840×2160` / `2560×1440`) even when opening or resizing EFF's `Ins` panel**.
+2. **🖥️ Prevents Mod GUI Menus (and `res_width` / `res_height` Shaders) from Blowing Up in Size**
+   - **The Problem**: Whenever an overlay plugin (such as legacy `ApplepieManager`'s `480×560` panel or EFF's `604×640` panel) creates a composition swap chain through 3DMigoto, 3DMigoto's global `res_width` and `res_height` get overwritten with the small popup dimensions. Any in-game **Mod GUI Menu** relying on `res_width` / `res_height` becomes massively oversized and unusable.
+   - **The Fix**: EFF's panel creation and window resizing bypass 3DMigoto's swap-chain hook completely, and this plugin itself creates zero windows or swap chains—keeping **`res_width` and `res_height` locked to your true game resolution (e.g., `3840×2160` / `2560×1440`) so Mod GUI Menus stay at 100% normal scale**.
 
 3. **🛡️ Built-in Headless 3-Layer UID / Name Hider (Zero `d3dcompiler_47.dll` Conflict)**
    - **The Problem**: Newer `ApplepieManager` builds and EFF both ship their own `d3dcompiler_47.dll` proxy in the game root and cannot overwrite each other, while legacy `applepie_manager.dll` creates a `480×560` ImGui swap chain that corrupts 3DMigoto resolution.
@@ -48,7 +48,7 @@ Arknights Endfield/                 (Game root folder containing Endfield.exe)
 
 Once in-game:
 - Press **`Ins` (`Insert`)** to open/close the **EFF Mod Control Panel** (`Esc` also closes it).
-- Press **`Ctrl + K`** to use **73layol EFMI menus** at normal resolution.
+- Open in-game **Mod GUI Menus** (e.g., `Ctrl + K`) — menu scale and click hitboxes remain completely normal.
 - Check `<GameRoot>\plugin\hide_uid_log.txt` for `[EFF-FIX]` and `[HideUID]` status logs.
 
 ---
@@ -67,18 +67,7 @@ Edit `plugin\hide_uid.ini` with any text editor (`1` = enabled, `0` = disabled; 
 | **`[uid]`** | `hide_card_name` | **`1`** | **Hide** profile / business card nickname (`PersonalInfoNode`) |
 | **`[eff]`** | `fix_eff_panel` | **`1`** | **Enable** EFF `Ins` panel crash fix & 3DMigoto `res_width` / `res_height` resolution protection |
 
-> Tip: If you only want the EFF `Ins` panel crash fix + 73layol resolution protection without hiding any UIDs, set all keys under `[uid]` to `0` and keep `fix_eff_panel=1`.
-
----
-
-## 🔬 How It Works Under the Hood
-
-3DMigoto (`EFMI\d3d11.dll`) hooks `IDXGIFactory2::CreateSwapChainForComposition` via Deviare (`cHookMgr`) and enforces in `sort_out_swap_chain_device_mess` that any incoming `ID3D11Device` must be wrapped as a `HackerDevice` (calling `DoubleBeepExit()` otherwise). However, every hooked entry point in 3DMigoto starts with a built-in re-entrancy fast-path: `if (get_tls()->hooking_quirk_protection) return fnOrig(...);`.
-
-Instead of installing fragile global hooks on `dxgi.dll`, this plugin patches only `eff.dll`'s own IAT entries (`D3D11CreateDevice` and `DCompositionCreateDevice`), leaving Unity's main rendering thread completely untouched:
-- When `eff.dll`'s dedicated `EiemControlPanel::Window::Run` thread calls `D3D11CreateDevice`, the plugin locates 3DMigoto's `tls_idx` slot via instruction-level verification.
-- It performs a harmless warmup probe so 3DMigoto's own CRT allocator initializes the thread's `TLS` struct (ensuring safe `operator delete` cleanup during `DLL_THREAD_DETACH`), then sets `hooking_quirk_protection = 1` on that UI thread.
-- `D3D11CreateDevice`, `CreateSwapChainForComposition`, `ClipCursor(nullptr)`, and Optimus `Present` on EFF's UI thread all take 3DMigoto's native passthrough fast-path—preventing `HackerSwapChain` wrapping (`0xC0000005` crash) and skipping `override_factory2_swap_chain` (`res_width` / `res_height` pollution).
+> Tip: If you only want the EFF `Ins` panel crash fix + Mod GUI Menu resolution protection without hiding any UIDs, set all keys under `[uid]` to `0` and keep `fix_eff_panel=1`.
 
 ---
 
