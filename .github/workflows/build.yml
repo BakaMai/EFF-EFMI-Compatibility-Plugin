@@ -7,6 +7,15 @@ on:
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag to attach precompiled zip asset to (e.g. v1.1.0)'
+        required: false
+        default: 'v1.1.0'
+        type: string
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -24,15 +33,39 @@ jobs:
         run: cmd /c build.bat
 
       - name: Package Release Zip
-        shell: pwsh
+        shell: bash
         run: |
-          New-Item -ItemType Directory -Force -Path dist/plugin | Out-Null
-          Copy-Item plugin/hide_uid.dll dist/plugin/hide_uid.dll -Force
-          Copy-Item plugin/hide_uid.ini dist/plugin/hide_uid.ini -Force
-          Compress-Archive -Path dist/plugin -DestinationPath EFF-EFMI-Compatibility-Plugin.zip -Force
+          python - << 'PY'
+          import os, zipfile
+          entries = ['plugin/hide_uid.dll', 'plugin/hide_uid.ini', 'README.md', 'README.EN.md', 'LICENSE']
+          with zipfile.ZipFile('EFF-EFMI-Compatibility-Plugin.zip', 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+              for e in entries:
+                  if not os.path.isfile(e):
+                      raise FileNotFoundError(e)
+                  zf.write(e, arcname=e)
+          print('Packaged EFF-EFMI-Compatibility-Plugin.zip:', os.path.getsize('EFF-EFMI-Compatibility-Plugin.zip'), 'bytes')
+          PY
 
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
         with:
           name: EFF-EFMI-Compatibility-Plugin
           path: EFF-EFMI-Compatibility-Plugin.zip
+
+      - name: Attach Asset to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP_NAME="EFF-EFMI-Compatibility-Plugin_${RELEASE_TAG}.zip"
+          cp -f EFF-EFMI-Compatibility-Plugin.zip "${ZIP_NAME}"
+          if gh release view "${RELEASE_TAG}" -R "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "Uploading ${ZIP_NAME} to existing release ${RELEASE_TAG}..."
+            gh release upload "${RELEASE_TAG}" "${ZIP_NAME}" --clobber -R "${GITHUB_REPOSITORY}"
+          else
+            echo "Creating release ${RELEASE_TAG} with ${ZIP_NAME}..."
+            gh release create "${RELEASE_TAG}" "${ZIP_NAME}" --title "EFF-EFMI-Compatibility-Plugin ${RELEASE_TAG}" --generate-notes -R "${GITHUB_REPOSITORY}"
+          fi

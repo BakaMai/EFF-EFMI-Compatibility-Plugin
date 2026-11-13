@@ -15,6 +15,10 @@ if %errorlevel% equ 0 (
         deps\minhook\src\hde\hde64.c ^
         user32.lib kernel32.lib ^
         /Fe"plugin\hide_uid.dll" /link /DLL
+    if !errorlevel! neq 0 (
+        echo [ERROR] MSVC compilation failed.
+        exit /b 1
+    )
     del /q *.obj plugin\hide_uid.exp plugin\hide_uid.lib 2>nul
     echo [OK] Built plugin\hide_uid.dll
     exit /b 0
@@ -33,6 +37,10 @@ if %errorlevel% equ 0 (
         deps\minhook\src\hde\hde64.c ^
         -luser32 -lkernel32 ^
         -o plugin\hide_uid.dll
+    if !errorlevel! neq 0 (
+        echo [ERROR] Zig compilation failed.
+        exit /b 1
+    )
     del /q plugin\hide_uid.lib plugin\hide_uid.pdb 2>nul
     echo [OK] Built plugin\hide_uid.dll
     exit /b 0
