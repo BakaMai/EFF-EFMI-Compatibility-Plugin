@@ -27,10 +27,19 @@ When running ***Arknights: Endfield*** in **DX11 mode (`-force-d3d11`)** via XXM
 
 ## 📦 Installation (2 Steps)
 
-> 💡 **Coexistence Notes**:
-> 1. Launch the game in **DX11 mode** via **XXMI Launcher** (for EFMI) while keeping EFF's `d3dcompiler_47.dll` and `plugin\eff.dll` installed in the game directory.
-> 2. **Do NOT enable an EFMI mod and an EFF mod for the exact same character at the same time** (using EFMI mods on Character A and EFF mods on Character B works seamlessly).
-> 3. If you still have an old **`applepie_manager.dll`** inside `<GameRoot>\plugin\`, remove it first so it does not create a `480×560` swap chain.
+> [!WARNING]
+> When using this plugin, **immediately remove / uninstall** the **`Hide UI＆UID`** mod inside your `EFMI\Mods` folder (originating from GameBanana: [https://gamebanana.com/mods/657915](https://gamebanana.com/mods/657915)).  
+> That legacy shader-based hider suffers from severe drawbacks and is completely superseded by this plugin:
+> - **Leaks your UID during high-Ping spikes**;
+> - **Cannot display network latency (Ping ms)**;
+> - **Causes system & rendering performance degradation**.
+
+**Coexistence Checklist:**
+1. Launch the game in **DX11 mode** via **XXMI Launcher** (for EFMI) while keeping EFF's `d3dcompiler_47.dll` and `plugin\eff.dll` installed in the game directory.
+2. **Do NOT enable an EFMI mod and an EFF mod for the exact same character at the same time** (using EFMI mods on Character A and EFF mods on Character B works seamlessly).
+3. If you still have an old **`applepie_manager.dll`** inside `<GameRoot>\plugin\`, remove it first so it does not create a `480×560` swap chain.
+
+**Installation Steps:**
 
 1. Download the latest release zip from [Releases](https://github.com/BakaMai/EFF-EFMI-Compatibility-Plugin/releases) (or grab `plugin/hide_uid.dll` and `plugin/hide_uid.ini` from this repository).
 2. Place `hide_uid.dll` and `hide_uid.ini` into **`<GameRoot>\plugin\`** (right next to `eff.dll`):

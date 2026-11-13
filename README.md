@@ -27,10 +27,19 @@
 
 ## 📦 安装方法（两步即用）
 
-> 💡 **共存前提说明**：
-> 1. 保持通过 **XXMI Launcher** 以 **DX11 模式**启动游戏（加载 EFMI），同时游戏根目录保留 EFF 安装好的 `d3dcompiler_47.dll` 与 `plugin\eff.dll`。
-> 2. **切勿对同一个角色同时启用 EFMI Mod 和 EFF Mod**（不同角色分别使用 EFMI 和 EFF 完全互不干扰）。
-> 3. 如果你的 `<游戏根目录>\plugin\` 下还留有旧版 **`applepie_manager.dll`**，请先将其移走或删除，避免旧版创建 `480×560` 交换链或重复 Hook。
+> [!WARNING]
+> 在使用本插件的同时，请**立刻删除 / 卸载** `EFMI\Mods` 文件夹下的 **`Hide UI＆UID`** 插件（源于 GameBanana：[https://gamebanana.com/mods/657915](https://gamebanana.com/mods/657915)）。  
+> 该旧版着色器类隐藏插件存在以下严重缺陷，已由本插件完全替代：
+> - **高延迟（高 Ping）时会漏出 UID**（无法彻底隐藏）；
+> - **一刀切抹除了右下角网络延迟（Ping）显示**；
+> - **持续拦截 UI 渲染通道，会造成系统与游戏帧率性能下降**。
+
+**共存前提检查：**
+1. 保持通过 **XXMI Launcher** 以 **DX11 模式**启动游戏（加载 EFMI），同时游戏根目录保留 EFF 安装好的 `d3dcompiler_47.dll` 与 `plugin\eff.dll`。
+2. **切勿对同一个角色同时启用 EFMI Mod 和 EFF Mod**（不同角色分别使用 EFMI 和 EFF 完全互不干扰）。
+3. 如果你的 `<游戏根目录>\plugin\` 下还留有旧版 **`applepie_manager.dll`**，请先将其移走或删除，避免旧版创建 `480×560` 交换链或重复 Hook。
+
+**安装步骤：**
 
 1. 前往 [Releases](https://github.com/BakaMai/EFF-EFMI-Compatibility-Plugin/releases) 下载最新压缩包（或直接取仓库内的 `plugin/hide_uid.dll` 与 `plugin/hide_uid.ini`）。
 2. 将 `hide_uid.dll` 和 `hide_uid.ini` 放入 **`<游戏根目录>\plugin\`** 文件夹（与 `eff.dll` 同级）即可：
