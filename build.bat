@@ -13,7 +13,7 @@ if %errorlevel% equ 0 (
         deps\minhook\src\hook.c ^
         deps\minhook\src\trampoline.c ^
         deps\minhook\src\hde\hde64.c ^
-        user32.lib kernel32.lib ^
+        user32.lib gdi32.lib dwmapi.lib kernel32.lib ^
         /Fe"plugin\hide_uid.dll" /link /DLL
     if !errorlevel! neq 0 (
         echo [ERROR] MSVC compilation failed.
@@ -35,7 +35,7 @@ if %errorlevel% equ 0 (
         deps\minhook\src\hook.c ^
         deps\minhook\src\trampoline.c ^
         deps\minhook\src\hde\hde64.c ^
-        -luser32 -lkernel32 ^
+        -luser32 -lgdi32 -ldwmapi -lkernel32 ^
         -o plugin\hide_uid.dll
     if !errorlevel! neq 0 (
         echo [ERROR] Zig compilation failed.
