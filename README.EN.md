@@ -1,4 +1,4 @@
-# EFF-EFMI-Compatibility-Plugin v1.2.1
+# EFF-EFMI-Compatibility-Plugin v1.2.2
 
 🌐 **[中文说明文档 (README.md)](./README.md)**
 
@@ -7,9 +7,11 @@
 
 ---
 
-## ✨ What's New in v1.2.1
+## ✨ What's New in v1.2.2
 
-- **🛡️ Marathon-Session Stability Fix (`v1.2.1` Critical Update)**:
+- **🎨 Pixel-Perfect Rounded Corners & Concentric Top Accent Clip (`v1.2.2`)**:
+  - Upgraded the `HOME` panel to per-pixel premultiplied `ULW_ALPHA` layered compositing with analytical SDF corner masking — delivering true anti-aliased transparent rounded corners on **both Windows 10 and Windows 11**, and clipping the top cyan-gold accent bar concentrically inside the outer border with zero corner bleed (still 100% pure Win32/GDI, zero DX11 / zero SwapChain).
+- **🛡️ Marathon-Session Stability Fix (`v1.2.1+`)**:
   - **Fixes Long-Session `0xC0000005` Crash**: Eliminated dangling pointer dereferences during `g_seenTable` bucket eviction after Boehm GC unmaps old `4 KB` UI pages, switched `g_compCache` to **`il2cpp_gchandle_new_weakref` weak handles** (allowing Unity GC to freely collect closed UI panels), and protected all memory reads/writes with **hardware `__try / __except` SEH + `VirtualQuery` `MEM_COMMIT` validation**.
   - **Eliminates Lock Contention & Idle GC Churn**: Strictly gates all IL2CPP hooks to `g_mainThreadId` at entry (removing cross-thread locks that could deadlock with Boehm GC `SuspendThread`), removes synchronous `FlushFileBuffers` disk barriers, and pre-pins static lookup strings so multi-hour idle gameplay incurs **zero `il2cpp_runtime_invoke` calls and zero GC heap allocations**.
 - **🎛️ Built-in `HOME` GUI Control Panel (Zero DX11 / Zero SwapChain / Zero Conflict)**:

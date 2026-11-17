@@ -1,5 +1,5 @@
 // ============================================================================
-// EFF-EFMI-Compatibility-Plugin (hide_uid.c) v1.2.1
+// EFF-EFMI-Compatibility-Plugin (hide_uid.c) v1.2.2
 // https://github.com/BakaMai/EFF-EFMI-Compatibility-Plugin
 // ============================================================================
 // Coexistence bridge & live-toggle UID/Name hider for Arknights: Endfield
@@ -1853,7 +1853,7 @@ static DWORD WINAPI InitThread(LPVOID unused) {
     g_hLogFile = CreateFileW(g_logPath, GENERIC_WRITE, FILE_SHARE_READ, NULL,
                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 
-    Log("=== EFF-EFMI-Compatibility-Plugin v1.2.1 (Marathon-Hardened Live GUI + 3DMigoto Fix) ===");
+    Log("=== EFF-EFMI-Compatibility-Plugin v1.2.2 (Marathon-Hardened Live GUI + 3DMigoto Fix) ===");
 
     HideUidConfig cfg;
     int hadIni = LoadHideUidConfig(g_iniPath, &cfg);
@@ -2118,7 +2118,7 @@ static DWORD WINAPI InitThread(LPVOID unused) {
         }
     }
 
-    Log("[Ready] All active hooks & pure-Win32 GUI panel armed (marathon-hardened v1.2.1).");
+    Log("[Ready] All active hooks & pure-Win32 GUI panel armed (marathon-hardened v1.2.2).");
     return 0;
 }
 

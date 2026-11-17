@@ -1,4 +1,4 @@
-# EFF-EFMI-Compatibility-Plugin v1.2.1
+# EFF-EFMI-Compatibility-Plugin v1.2.2
 
 🌐 **[English Documentation (README.EN.md)](./README.EN.md)**
 
@@ -7,9 +7,11 @@
 
 ---
 
-## ✨ v1.2.1 稳定性更新 & 核心特性
+## ✨ v1.2.2 更新亮点 & 核心特性
 
-- **🛡️ 修复长时间运行 / 挂机崩溃与假死隐患（`v1.2.1` 重点更新）**：
+- **🎨 面板真透明抗锯齿圆角与顶部光带对齐修复（`v1.2.2`）**：
+  - 面板窗口升级为 `WS_EX_LAYERED` + `ULW_ALPHA` 逐像素预乘 Alpha 图层自绘，无论在 **Windows 10** 还是 **Windows 11** 下均拥有真正的亚像素平滑透明圆角（彻底告别 Win10 直角底框与顶部蓝色装饰条超出圆角的强迫症痛点，同时依然保持零 DX11 / 零交换链 / 零冲突）。
+- **🛡️ 修复长时间运行 / 挂机崩溃与假死隐患（`v1.2.1+`）**：
   - **根治长时运行 `0xC0000005` 闪退**：移除 `g_seenTable` 满槽淘汰时对历史对象裸指针的探活解引用，将 `g_compCache` 升级为 `il2cpp_gchandle_new_weakref` **弱引用句柄**（绝不阻碍 Unity GC 释放已关闭的 UI 面板，回收后安全返回 `NULL`），并为全部底层内存读写补齐 **MSVC `__try / __except` 硬件异常保护 + `VirtualQuery` 页提交校验**。
   - **彻底消除跨线程锁与挂机 GC 压力**：所有 IL2CPP Hook 入口首行严格限定主线程直通，彻底移除跨线程读写锁（杜绝与 Boehm GC `SuspendThread` 发生锁序死锁导致的窗口未响应），移除阻塞式 `FlushFileBuffers` 刷盘，并将常量节点路径改为启动时一次性预分配，稳态挂机 **0 次反射调用、0 字节 GC 垃圾分配**。
 - **🎛️ 内置 `HOME` 图形控制面板（零 DX11 / 零交换链 / 零冲突架构）**：

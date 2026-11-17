@@ -288,12 +288,6 @@ static void ComputePanelLayout(HWND hwnd, PanelLayout* L) {
     L->w   = ScalePx(PANEL_BASE_W, dpi);
     L->h   = ScalePx(PANEL_BASE_H, dpi);
 
-    RECT client;
-    if (hwnd && GetClientRect(hwnd, &client) && client.right > 100 && client.bottom > 100) {
-        L->w = client.right;
-        L->h = client.bottom;
-    }
-
     L->header.left   = 0;
     L->header.top    = 0;
     L->header.right  = L->w;
@@ -443,98 +437,97 @@ static HFONT CreateUiFont(int pxHeight, int weight) {
         L"Microsoft YaHei UI");
 }
 
-static void RenderPanel(HWND hwnd, HDC outDc) {
-    PanelLayout L;
-    ComputePanelLayout(hwnd, &L);
-    if (L.w <= 0 || L.h <= 0) return;
+static void RenderPanelToDib(const PanelLayout* L, HDC memDc, uint32_t* pixels) {
+    const float outerRad = (float)ScalePx(10, L->dpi);
+    float borderW = (float)ScalePx(1, L->dpi);
+    if (borderW < 1.0f) borderW = 1.0f;
 
-    BITMAPINFO bmi;
-    memset(&bmi, 0, sizeof(bmi));
-    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth       = L.w;
-    bmi.bmiHeader.biHeight      = -L.h; // top-down
-    bmi.bmiHeader.biPlanes      = 1;
-    bmi.bmiHeader.biBitCount    = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
+    const float cx = 0.5f * (float)L->w;
+    const float cy = 0.5f * (float)L->h;
+    const float hw = 0.5f * (float)L->w;
+    const float hh = 0.5f * (float)L->h;
 
-    void* rawBits = NULL;
-    HDC memDc = CreateCompatibleDC(outDc);
-    if (!memDc) return;
-
-    HBITMAP dib = CreateDIBSection(outDc, &bmi, DIB_RGB_COLORS, &rawBits, NULL, 0);
-    if (!dib || !rawBits) {
-        if (dib) DeleteObject(dib);
-        DeleteDC(memDc);
-        return;
-    }
-
-    HGDIOBJ oldBmp = SelectObject(memDc, dib);
-    uint32_t* pixels = (uint32_t*)rawBits;
-
-    // 1. Background vertical gradient + subtle outer frame
-    for (int y = 0; y < L.h; y++) {
-        float ty = (float)y / (float)(L.h > 1 ? L.h - 1 : 1);
+    // 1. Background vertical gradient
+    for (int y = 0; y < L->h; y++) {
+        float ty = (float)y / (float)(L->h > 1 ? L->h - 1 : 1);
         uint32_t bg = LerpColor(PackRgb(16, 20, 28), PackRgb(21, 27, 38), ty);
-        uint32_t* row = pixels + (size_t)y * (size_t)L.w;
-        for (int x = 0; x < L.w; x++) row[x] = bg;
+        uint32_t* row = pixels + (size_t)y * (size_t)L->w;
+        for (int x = 0; x < L->w; x++) row[x] = bg;
     }
 
-    // Endfield top accent bar (cyan -> gold-white subtle highlight)
-    int accentH = ScalePx(3, L.dpi);
+    // 2. Endfield top accent bar (cyan -> gold-white), strictly clipped to the
+    //    concentric inner rounded boundary (d + borderW <= 0) so ZERO cyan pixels
+    //    can ever bleed past the rounded corners or clash with the outer border!
+    int accentTop = (int)(borderW + 0.5f);
+    int accentH   = ScalePx(3, L->dpi);
     if (accentH < 2) accentH = 2;
-    for (int y = 0; y < accentH && y < L.h; y++) {
-        uint32_t* row = pixels + (size_t)y * (size_t)L.w;
-        for (int x = 0; x < L.w; x++) {
-            float tx = (float)x / (float)(L.w > 1 ? L.w - 1 : 1);
-            row[x] = LerpColor(PackRgb(46, 172, 248), PackRgb(242, 210, 92), tx * 0.65f);
+    int accentEnd = accentTop + accentH;
+    if (accentEnd > L->h) accentEnd = L->h;
+
+    for (int y = 0; y < accentEnd; y++) {
+        uint32_t* row = pixels + (size_t)y * (size_t)L->w;
+        float py = (float)y + 0.5f;
+        for (int x = 0; x < L->w; x++) {
+            float d = SdfRoundedBox((float)x + 0.5f, py, cx, cy, hw, hh, outerRad);
+            float innerMask = Clamp01(0.5f - (d + borderW));
+            // Smoothly mask top & bottom edges of the accent strip as well
+            float vTopMask = Clamp01(py - borderW + 0.5f);
+            float vBotMask = Clamp01((float)accentEnd - py + 0.5f);
+            float mask = innerMask * vTopMask * vBotMask;
+            if (mask > 0.0f) {
+                float tx = (float)x / (float)(L->w > 1 ? L->w - 1 : 1);
+                uint32_t accentCol = LerpColor(PackRgb(46, 172, 248), PackRgb(242, 210, 92), tx * 0.65f);
+                BlendPixel(&row[x], accentCol, mask);
+            }
         }
     }
 
-    // Header separator
-    DrawHLineAlpha(pixels, L.w, L.h, 0, L.w, L.header.bottom, PackRgb(45, 56, 76), 0.85f);
+    // Header separator (clipped safely inside outer border)
+    int sepPad = (int)(borderW + 1.0f);
+    DrawHLineAlpha(pixels, L->w, L->h, sepPad, L->w - sepPad, L->header.bottom, PackRgb(45, 56, 76), 0.85f);
 
     // Language button & Close button
-    float radBtn = (float)ScalePx(6, L.dpi);
-    DrawSdfRoundedRect(pixels, L.w, L.h, L.btnLang, radBtn,
+    float radBtn = (float)ScalePx(6, L->dpi);
+    DrawSdfRoundedRect(pixels, L->w, L->h, L->btnLang, radBtn,
                        g_hoverId == HIT_LANG_BTN ? PackRgb(42, 54, 74) : PackRgb(28, 36, 50), 1.0f,
                        PackRgb(64, 80, 106), 0.9f, 1.0f);
 
-    DrawSdfRoundedRect(pixels, L.w, L.h, L.btnClose, radBtn,
+    DrawSdfRoundedRect(pixels, L->w, L->h, L->btnClose, radBtn,
                        g_hoverId == HIT_CLOSE_BTN ? PackRgb(196, 58, 66) : PackRgb(28, 36, 50), 1.0f,
                        g_hoverId == HIT_CLOSE_BTN ? PackRgb(235, 100, 108) : PackRgb(64, 80, 106), 0.9f, 1.0f);
 
-    // 2. Three section cards + hover highlights + toggle pills
-    float cardRad = (float)ScalePx(10, L.dpi);
+    // 3. Three section cards + hover highlights + toggle pills
+    float cardRad = (float)ScalePx(10, L->dpi);
     for (int s = 0; s < 3; s++) {
-        DrawSdfRoundedRect(pixels, L.w, L.h, L.card[s], cardRad,
+        DrawSdfRoundedRect(pixels, L->w, L->h, L->card[s], cardRad,
                            PackRgb(25, 32, 45), 1.0f,
                            PackRgb(44, 56, 76), 0.95f, 1.0f);
 
         for (int r = 0; r < 2; r++) {
             int idx = s * 2 + r;
             if (g_hoverId == HIT_ROW_0 + idx) {
-                RECT hrc = L.row[idx];
-                hrc.left   += ScalePx(3, L.dpi);
-                hrc.right  -= ScalePx(3, L.dpi);
-                hrc.top    += ScalePx(2, L.dpi);
-                hrc.bottom -= ScalePx(2, L.dpi);
-                DrawSdfRoundedRect(pixels, L.w, L.h, hrc, (float)ScalePx(7, L.dpi),
+                RECT hrc = L->row[idx];
+                hrc.left   += ScalePx(3, L->dpi);
+                hrc.right  -= ScalePx(3, L->dpi);
+                hrc.top    += ScalePx(2, L->dpi);
+                hrc.bottom -= ScalePx(2, L->dpi);
+                DrawSdfRoundedRect(pixels, L->w, L->h, hrc, (float)ScalePx(7, L->dpi),
                                    PackRgb(42, 55, 76), 0.55f, 0, 0.0f, 0.0f);
             }
-            DrawTogglePill(pixels, L.w, L.h, L.pill[idx], g_knobAnim[idx],
-                           g_hoverId == HIT_ROW_0 + idx, L.dpi);
+            DrawTogglePill(pixels, L->w, L->h, L->pill[idx], g_knobAnim[idx],
+                           g_hoverId == HIT_ROW_0 + idx, L->dpi);
         }
 
         // Row divider inside card
-        DrawHLineAlpha(pixels, L.w, L.h,
-                       L.card[s].left + ScalePx(14, L.dpi),
-                       L.card[s].right - ScalePx(14, L.dpi),
-                       L.row[s * 2].bottom,
+        DrawHLineAlpha(pixels, L->w, L->h,
+                       L->card[s].left + ScalePx(14, L->dpi),
+                       L->card[s].right - ScalePx(14, L->dpi),
+                       L->row[s * 2].bottom,
                        PackRgb(42, 53, 72), 0.85f);
     }
 
-    // 3. Hotkey card & recorder button
-    DrawSdfRoundedRect(pixels, L.w, L.h, L.hotkeyCard, cardRad,
+    // 4. Hotkey card & recorder button
+    DrawSdfRoundedRect(pixels, L->w, L->h, L->hotkeyCard, cardRad,
                        PackRgb(25, 32, 45), 1.0f,
                        PackRgb(44, 56, 76), 0.95f, 1.0f);
 
@@ -542,51 +535,51 @@ static void RenderPanel(HWND hwnd, HDC outDc) {
                       : (g_hoverId == HIT_HOTKEY_BTN ? PackRgb(40, 56, 80) : PackRgb(32, 43, 60));
     uint32_t hkBorder = g_recordingHotkey ? PackRgb(242, 186, 72)
                       : (g_hoverId == HIT_HOTKEY_BTN ? PackRgb(88, 176, 246) : PackRgb(64, 82, 110));
-    DrawSdfRoundedRect(pixels, L.w, L.h, L.btnHotkey, (float)ScalePx(7, L.dpi),
+    DrawSdfRoundedRect(pixels, L->w, L->h, L->btnHotkey, (float)ScalePx(7, L->dpi),
                        hkFill, 1.0f, hkBorder, 0.95f, 1.0f);
 
-    // Subtle outer border for Win10 compatibility
-    RECT fullRc = { 0, 0, L.w, L.h };
-    DrawSdfRoundedRect(pixels, L.w, L.h, fullRc, (float)ScalePx(8, L.dpi),
-                       0, 0.0f, PackRgb(54, 68, 92), 0.7f, 1.0f);
+    // 5. Crisp unbroken outer rounded frame
+    RECT fullRc = { 0, 0, L->w, L->h };
+    DrawSdfRoundedRect(pixels, L->w, L->h, fullRc, outerRad,
+                       0, 0.0f, PackRgb(58, 74, 100), 0.92f, borderW);
 
     GdiFlush();
 
-    // 4. ClearType Typography Pass
+    // 6. ClearType Typography Pass
     SetBkMode(memDc, TRANSPARENT);
     int en = (g_uiLang == 1);
 
-    HFONT fTitle   = CreateUiFont(ScalePx(16, L.dpi), FW_BOLD);
-    HFONT fSub     = CreateUiFont(ScalePx(11, L.dpi), FW_NORMAL);
-    HFONT fSec     = CreateUiFont(ScalePx(12, L.dpi), FW_BOLD);
-    HFONT fRowMain = CreateUiFont(ScalePx(14, L.dpi), FW_SEMIBOLD);
-    HFONT fRowDesc = CreateUiFont(ScalePx(11, L.dpi), FW_NORMAL);
-    HFONT fBtn     = CreateUiFont(ScalePx(12, L.dpi), FW_BOLD);
+    HFONT fTitle   = CreateUiFont(ScalePx(16, L->dpi), FW_BOLD);
+    HFONT fSub     = CreateUiFont(ScalePx(11, L->dpi), FW_NORMAL);
+    HFONT fSec     = CreateUiFont(ScalePx(12, L->dpi), FW_BOLD);
+    HFONT fRowMain = CreateUiFont(ScalePx(14, L->dpi), FW_SEMIBOLD);
+    HFONT fRowDesc = CreateUiFont(ScalePx(11, L->dpi), FW_NORMAL);
+    HFONT fBtn     = CreateUiFont(ScalePx(12, L->dpi), FW_BOLD);
 
     HGDIOBJ oldFont = SelectObject(memDc, fTitle);
 
     // Header title & subtitle
-    RECT rcTitle = { ScalePx(20, L.dpi), ScalePx(12, L.dpi), L.btnLang.left - ScalePx(8, L.dpi), ScalePx(35, L.dpi) };
+    RECT rcTitle = { ScalePx(20, L->dpi), ScalePx(12, L->dpi), L->btnLang.left - ScalePx(8, L->dpi), ScalePx(35, L->dpi) };
     SetTextColor(memDc, RGB(240, 245, 252));
     DrawTextW(memDc,
               en ? L"Hide UID Control Panel" : L"UID \u9690\u85CF\u63A7\u5236\u9762\u677F",
               -1, &rcTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
     SelectObject(memDc, fSub);
-    RECT rcSub = { ScalePx(20, L.dpi), ScalePx(36, L.dpi), L.btnLang.left - ScalePx(8, L.dpi), ScalePx(54, L.dpi) };
+    RECT rcSub = { ScalePx(20, L->dpi), ScalePx(36, L->dpi), L->btnLang.left - ScalePx(8, L->dpi), ScalePx(54, L->dpi) };
     SetTextColor(memDc, RGB(114, 168, 214));
     DrawTextW(memDc,
-              en ? L"EFF \u00B7 EFMI Coexistence Bridge v1.2.1" : L"EFF \u00B7 EFMI \u517C\u5BB9\u6865\u63A5\u63D2\u4EF6 v1.2.1",
+              en ? L"EFF \u00B7 EFMI Coexistence Bridge v1.2.2" : L"EFF \u00B7 EFMI \u517C\u5BB9\u6865\u63A5\u63D2\u4EF6 v1.2.2",
               -1, &rcSub, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
     // Lang & Close button labels
     SelectObject(memDc, fBtn);
     SetTextColor(memDc, RGB(214, 226, 242));
-    DrawTextW(memDc, en ? L"\u4E2D\u6587" : L"EN", -1, &L.btnLang,
+    DrawTextW(memDc, en ? L"\u4E2D\u6587" : L"EN", -1, (LPRECT)&L->btnLang,
               DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
     SetTextColor(memDc, g_hoverId == HIT_CLOSE_BTN ? RGB(255, 255, 255) : RGB(210, 220, 236));
-    DrawTextW(memDc, L"\u00D7", -1, &L.btnClose,
+    DrawTextW(memDc, L"\u00D7", -1, (LPRECT)&L->btnClose,
               DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
     // Section headers & rows
@@ -594,21 +587,21 @@ static void RenderPanel(HWND hwnd, HDC outDc) {
         SelectObject(memDc, fSec);
         SetTextColor(memDc, RGB(122, 146, 178));
         DrawTextW(memDc, en ? kSecTitlesEn[s] : kSecTitlesZh[s],
-                  -1, &L.secLabel[s], DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                  -1, (LPRECT)&L->secLabel[s], DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
         for (int r = 0; r < 2; r++) {
             int idx = s * 2 + r;
             RECT rMain = {
-                L.row[idx].left + ScalePx(16, L.dpi),
-                L.row[idx].top + ScalePx(7, L.dpi),
-                L.pill[idx].left - ScalePx(12, L.dpi),
-                L.row[idx].top + ScalePx(28, L.dpi)
+                L->row[idx].left + ScalePx(16, L->dpi),
+                L->row[idx].top + ScalePx(7, L->dpi),
+                L->pill[idx].left - ScalePx(12, L->dpi),
+                L->row[idx].top + ScalePx(28, L->dpi)
             };
             RECT rDesc = {
-                L.row[idx].left + ScalePx(16, L.dpi),
-                L.row[idx].top + ScalePx(28, L.dpi),
-                L.pill[idx].left - ScalePx(12, L.dpi),
-                L.row[idx].bottom - ScalePx(5, L.dpi)
+                L->row[idx].left + ScalePx(16, L->dpi),
+                L->row[idx].top + ScalePx(28, L->dpi),
+                L->pill[idx].left - ScalePx(12, L->dpi),
+                L->row[idx].bottom - ScalePx(5, L->dpi)
             };
 
             SelectObject(memDc, fRowMain);
@@ -625,10 +618,10 @@ static void RenderPanel(HWND hwnd, HDC outDc) {
 
     // Hotkey row
     RECT rcHkLabel = {
-        L.hotkeyCard.left + ScalePx(16, L.dpi),
-        L.hotkeyCard.top,
-        L.btnHotkey.left - ScalePx(10, L.dpi),
-        L.hotkeyCard.bottom
+        L->hotkeyCard.left + ScalePx(16, L->dpi),
+        L->hotkeyCard.top,
+        L->btnHotkey.left - ScalePx(10, L->dpi),
+        L->hotkeyCard.bottom
     };
     SelectObject(memDc, fRowMain);
     SetTextColor(memDc, RGB(232, 238, 248));
@@ -639,7 +632,7 @@ static void RenderPanel(HWND hwnd, HDC outDc) {
     if (g_recordingHotkey) {
         SetTextColor(memDc, RGB(255, 214, 112));
         DrawTextW(memDc, en ? L"Press key... (Esc)" : L"\u8BF7\u6309\u952E... (Esc\u53D6\u6D88)",
-                  -1, &L.btnHotkey, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                  -1, (LPRECT)&L->btnHotkey, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     } else {
         char hkAscii[64];
         HotkeyChord snapHk;
@@ -651,7 +644,7 @@ static void RenderPanel(HWND hwnd, HDC outDc) {
         wchar_t hkWide[64] = {0};
         MultiByteToWideChar(CP_UTF8, 0, hkAscii, -1, hkWide, 63);
         SetTextColor(memDc, RGB(126, 206, 255));
-        DrawTextW(memDc, hkWide, -1, &L.btnHotkey,
+        DrawTextW(memDc, hkWide, -1, (LPRECT)&L->btnHotkey,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     }
 
@@ -661,9 +654,45 @@ static void RenderPanel(HWND hwnd, HDC outDc) {
     DrawTextW(memDc,
               en ? L"Changes apply live & auto-save to hide_uid.ini \u00B7 Esc to close"
                  : L"\u5F00\u5173\u5B9E\u65F6\u751F\u6548\u5E76\u81EA\u52A8\u4FDD\u5B58\u81F3 hide_uid.ini \u00B7 \u6309 Esc \u6536\u8D77",
-              -1, &L.footer, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+              -1, (LPRECT)&L->footer, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-    BitBlt(outDc, 0, 0, L.w, L.h, memDc, 0, 0, SRCCOPY);
+    GdiFlush();
+
+    // 7. Premultiplied Alpha Finalization for ULW_ALPHA (true transparent anti-aliased
+    //    rounded corners on BOTH Windows 10 and Windows 11, while preserving 100% opaque
+    //    ClearType glyph RGB in the interior!)
+    int cornerZone = (int)(outerRad + 3.0f);
+    for (int y = 0; y < L->h; y++) {
+        uint32_t* row = pixels + (size_t)y * (size_t)L->w;
+        int inCornerY = (y < cornerZone) || (y >= L->h - cornerZone);
+        if (!inCornerY) {
+            for (int x = 0; x < L->w; x++) {
+                row[x] |= 0xFF000000u;
+            }
+        } else {
+            float py = (float)y + 0.5f;
+            for (int x = 0; x < L->w; x++) {
+                if (x >= cornerZone && x < L->w - cornerZone) {
+                    row[x] |= 0xFF000000u;
+                } else {
+                    float d = SdfRoundedBox((float)x + 0.5f, py, cx, cy, hw, hh, outerRad);
+                    float winAlpha = Clamp01(0.5f - d);
+                    if (winAlpha <= 0.002f) {
+                        row[x] = 0x00000000u;
+                    } else if (winAlpha >= 0.998f) {
+                        row[x] |= 0xFF000000u;
+                    } else {
+                        uint32_t c = row[x];
+                        uint8_t r = (uint8_t)((float)((c >> 16) & 0xFF) * winAlpha + 0.5f);
+                        uint8_t g = (uint8_t)((float)((c >> 8)  & 0xFF) * winAlpha + 0.5f);
+                        uint8_t b = (uint8_t)((float)( c        & 0xFF) * winAlpha + 0.5f);
+                        uint8_t a = (uint8_t)(winAlpha * 255.0f + 0.5f);
+                        row[x] = ((uint32_t)a << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+                    }
+                }
+            }
+        }
+    }
 
     SelectObject(memDc, oldFont);
     DeleteObject(fTitle);
@@ -672,7 +701,87 @@ static void RenderPanel(HWND hwnd, HDC outDc) {
     DeleteObject(fRowMain);
     DeleteObject(fRowDesc);
     DeleteObject(fBtn);
+}
 
+static void PresentLayeredPanel(HWND hwnd) {
+    if (!hwnd) return;
+    PanelLayout L;
+    ComputePanelLayout(hwnd, &L);
+    if (L.w <= 0 || L.h <= 0) return;
+
+    HDC screenDc = GetDC(NULL);
+    if (!screenDc) return;
+
+    HDC memDc = CreateCompatibleDC(screenDc);
+    if (!memDc) {
+        ReleaseDC(NULL, screenDc);
+        return;
+    }
+
+    BITMAPINFO bmi;
+    memset(&bmi, 0, sizeof(bmi));
+    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth       = L.w;
+    bmi.bmiHeader.biHeight      = -L.h; // top-down
+    bmi.bmiHeader.biPlanes      = 1;
+    bmi.bmiHeader.biBitCount    = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    void* rawBits = NULL;
+    HBITMAP dib = CreateDIBSection(screenDc, &bmi, DIB_RGB_COLORS, &rawBits, NULL, 0);
+    if (!dib || !rawBits) {
+        if (dib) DeleteObject(dib);
+        DeleteDC(memDc);
+        ReleaseDC(NULL, screenDc);
+        return;
+    }
+
+    HGDIOBJ oldBmp = SelectObject(memDc, dib);
+    RenderPanelToDib(&L, memDc, (uint32_t*)rawBits);
+
+    SIZE wndSize = { L.w, L.h };
+    POINT ptSrc  = { 0, 0 };
+    BLENDFUNCTION bf;
+    bf.BlendOp             = AC_SRC_OVER;
+    bf.BlendFlags          = 0;
+    bf.SourceConstantAlpha = 255;
+    bf.AlphaFormat         = AC_SRC_ALPHA;
+
+    UpdateLayeredWindow(hwnd, screenDc, NULL, &wndSize, memDc, &ptSrc, 0, &bf, ULW_ALPHA);
+
+    SelectObject(memDc, oldBmp);
+    DeleteObject(dib);
+    DeleteDC(memDc);
+    ReleaseDC(NULL, screenDc);
+}
+
+// Legacy GDI BitBlt wrapper kept for offline preview testing if needed
+static void RenderPanel(HWND hwnd, HDC outDc) {
+    PanelLayout L;
+    ComputePanelLayout(hwnd, &L);
+    if (L.w <= 0 || L.h <= 0) return;
+
+    BITMAPINFO bmi;
+    memset(&bmi, 0, sizeof(bmi));
+    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth       = L.w;
+    bmi.bmiHeader.biHeight      = -L.h;
+    bmi.bmiHeader.biPlanes      = 1;
+    bmi.bmiHeader.biBitCount    = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    void* rawBits = NULL;
+    HDC memDc = CreateCompatibleDC(outDc);
+    if (!memDc) return;
+    HBITMAP dib = CreateDIBSection(outDc, &bmi, DIB_RGB_COLORS, &rawBits, NULL, 0);
+    if (!dib || !rawBits) {
+        if (dib) DeleteObject(dib);
+        DeleteDC(memDc);
+        return;
+    }
+    HGDIOBJ oldBmp = SelectObject(memDc, dib);
+    RenderPanelToDib(&L, memDc, (uint32_t*)rawBits);
+    BitBlt(outDc, 0, 0, L.w, L.h, memDc, 0, 0, SRCCOPY);
     SelectObject(memDc, oldBmp);
     DeleteObject(dib);
     DeleteDC(memDc);
@@ -685,10 +794,12 @@ static void RenderPanel(HWND hwnd, HDC outDc) {
 static void ApplyDwmWindowStyle(HWND hwnd) {
     BOOL dark = TRUE;
     DwmSetWindowAttribute(hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
-    DWORD cornerPref = 2; /* DWMWCP_ROUND */
+    // Disable DWM rectangular/8dip frame so our ULW_ALPHA analytical SDF rounded
+    // corners render identically on both Windows 10 and Windows 11 with zero border clash!
+    DWORD cornerPref = 1; /* DWMWCP_DONOTROUND */
     DwmSetWindowAttribute(hwnd, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, &cornerPref, sizeof(cornerPref));
-    COLORREF borderCol = RGB(52, 66, 90);
-    DwmSetWindowAttribute(hwnd, 34 /* DWMWA_BORDER_COLOR */, &borderCol, sizeof(borderCol));
+    COLORREF noneBorder = 0xFFFFFFFEu; /* DWMWA_COLOR_NONE */
+    DwmSetWindowAttribute(hwnd, 34 /* DWMWA_BORDER_COLOR */, &noneBorder, sizeof(noneBorder));
 }
 
 static void SyncKnobTargetsImmediate(void) {
@@ -758,11 +869,11 @@ static void SetPanelVisible(HWND hwnd, int visible) {
         g_recordingHotkey = 0;
         SyncKnobTargetsImmediate();
         PositionPanelOnFirstShow(hwnd);
+        PresentLayeredPanel(hwnd);
         InterlockedExchange(&g_panelVisible, 1);
         ClipCursor(NULL);
         ShowWindow(hwnd, SW_SHOW);
         SetForegroundWindow(hwnd);
-        InvalidateRect(hwnd, NULL, FALSE);
     } else {
         g_recordingHotkey = 0;
         g_hoverId = HIT_NONE;
@@ -803,9 +914,9 @@ static LRESULT CALLBACK HideUidPanelWndProc(HWND hwnd, UINT msg, WPARAM wp, LPAR
 
         case WM_PAINT: {
             PAINTSTRUCT ps;
-            HDC hdc = BeginPaint(hwnd, &ps);
-            RenderPanel(hwnd, hdc);
+            BeginPaint(hwnd, &ps);
             EndPaint(hwnd, &ps);
+            PresentLayeredPanel(hwnd);
             return 0;
         }
 
@@ -819,7 +930,7 @@ static LRESULT CALLBACK HideUidPanelWndProc(HWND hwnd, UINT msg, WPARAM wp, LPAR
                 !PtInRect(&L.btnLang, pt)) {
                 if (g_hoverId != HIT_NONE) {
                     g_hoverId = HIT_NONE;
-                    InvalidateRect(hwnd, NULL, FALSE);
+                    PresentLayeredPanel(hwnd);
                 }
                 return HTCAPTION;
             }
@@ -848,7 +959,7 @@ static LRESULT CALLBACK HideUidPanelWndProc(HWND hwnd, UINT msg, WPARAM wp, LPAR
             SetCursor(LoadCursorA(NULL, hit != HIT_NONE ? IDC_HAND : IDC_ARROW));
             if (hit != g_hoverId) {
                 g_hoverId = hit;
-                InvalidateRect(hwnd, NULL, FALSE);
+                PresentLayeredPanel(hwnd);
             }
             return 0;
         }
@@ -856,7 +967,7 @@ static LRESULT CALLBACK HideUidPanelWndProc(HWND hwnd, UINT msg, WPARAM wp, LPAR
         case WM_MOUSELEAVE:
             if (g_hoverId != HIT_NONE) {
                 g_hoverId = HIT_NONE;
-                InvalidateRect(hwnd, NULL, FALSE);
+                PresentLayeredPanel(hwnd);
             }
             return 0;
 
@@ -875,12 +986,12 @@ static LRESULT CALLBACK HideUidPanelWndProc(HWND hwnd, UINT msg, WPARAM wp, LPAR
                 g_recordingHotkey = 0;
                 g_uiLang = (g_uiLang == 0) ? 1 : 0;
                 NotifyAndPersistGuiChanges();
-                InvalidateRect(hwnd, NULL, FALSE);
+                PresentLayeredPanel(hwnd);
                 return 0;
             }
             if (hit == HIT_HOTKEY_BTN) {
                 g_recordingHotkey = !g_recordingHotkey;
-                InvalidateRect(hwnd, NULL, FALSE);
+                PresentLayeredPanel(hwnd);
                 return 0;
             }
             if (hit >= HIT_ROW_0 && hit < HIT_ROW_0 + PANEL_ROW_COUNT) {
@@ -890,12 +1001,12 @@ static LRESULT CALLBACK HideUidPanelWndProc(HWND hwnd, UINT msg, WPARAM wp, LPAR
                 SetRowFlagValue(rowIdx, nextVal);
                 NotifyAndPersistGuiChanges();
                 StartKnobAnimTimer(hwnd);
-                InvalidateRect(hwnd, NULL, FALSE);
+                PresentLayeredPanel(hwnd);
                 return 0;
             }
             if (g_recordingHotkey) {
                 g_recordingHotkey = 0;
-                InvalidateRect(hwnd, NULL, FALSE);
+                PresentLayeredPanel(hwnd);
             }
             return 0;
         }
@@ -906,7 +1017,7 @@ static LRESULT CALLBACK HideUidPanelWndProc(HWND hwnd, UINT msg, WPARAM wp, LPAR
             if (g_recordingHotkey) {
                 if (vk == VK_ESCAPE) {
                     g_recordingHotkey = 0;
-                    InvalidateRect(hwnd, NULL, FALSE);
+                    PresentLayeredPanel(hwnd);
                     return 0;
                 }
                 if (IsModifierOnlyVk(vk)) {
@@ -925,7 +1036,7 @@ static LRESULT CALLBACK HideUidPanelWndProc(HWND hwnd, UINT msg, WPARAM wp, LPAR
                 g_recordingHotkey = 0;
                 g_waitKeyReleaseAfterBind = 1;
                 NotifyAndPersistGuiChanges();
-                InvalidateRect(hwnd, NULL, FALSE);
+                PresentLayeredPanel(hwnd);
                 return 0;
             }
             if (vk == VK_ESCAPE) {
@@ -948,7 +1059,7 @@ static LRESULT CALLBACK HideUidPanelWndProc(HWND hwnd, UINT msg, WPARAM wp, LPAR
                         g_knobAnim[i] = target;
                     }
                 }
-                InvalidateRect(hwnd, NULL, FALSE);
+                PresentLayeredPanel(hwnd);
                 if (!moving) {
                     KillTimer(hwnd, PANEL_TIMER_ANIM);
                     g_animTimerActive = 0;
@@ -965,7 +1076,7 @@ static LRESULT CALLBACK HideUidPanelWndProc(HWND hwnd, UINT msg, WPARAM wp, LPAR
                              suggested->right - suggested->left,
                              suggested->bottom - suggested->top,
                              SWP_NOZORDER | SWP_NOACTIVATE);
-                InvalidateRect(hwnd, NULL, FALSE);
+                PresentLayeredPanel(hwnd);
             }
             return 0;
         }
@@ -1024,7 +1135,7 @@ static DWORD WINAPI GuiPanelThread(LPVOID unused) {
     int initH = ScalePx(PANEL_BASE_H, initDpi);
 
     HWND hwnd = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
         wc.lpszClassName,
         L"Hide UID Control Panel",
         WS_POPUP,
@@ -1036,6 +1147,7 @@ static DWORD WINAPI GuiPanelThread(LPVOID unused) {
     g_panelHwnd = hwnd;
     ApplyDwmWindowStyle(hwnd);
     SyncKnobTargetsImmediate();
+    PresentLayeredPanel(hwnd);
 
     int prevDown = 0;
     MSG msg;
