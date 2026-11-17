@@ -755,38 +755,6 @@ static void PresentLayeredPanel(HWND hwnd) {
     ReleaseDC(NULL, screenDc);
 }
 
-// Legacy GDI BitBlt wrapper kept for offline preview testing if needed
-static void RenderPanel(HWND hwnd, HDC outDc) {
-    PanelLayout L;
-    ComputePanelLayout(hwnd, &L);
-    if (L.w <= 0 || L.h <= 0) return;
-
-    BITMAPINFO bmi;
-    memset(&bmi, 0, sizeof(bmi));
-    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth       = L.w;
-    bmi.bmiHeader.biHeight      = -L.h;
-    bmi.bmiHeader.biPlanes      = 1;
-    bmi.bmiHeader.biBitCount    = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-
-    void* rawBits = NULL;
-    HDC memDc = CreateCompatibleDC(outDc);
-    if (!memDc) return;
-    HBITMAP dib = CreateDIBSection(outDc, &bmi, DIB_RGB_COLORS, &rawBits, NULL, 0);
-    if (!dib || !rawBits) {
-        if (dib) DeleteObject(dib);
-        DeleteDC(memDc);
-        return;
-    }
-    HGDIOBJ oldBmp = SelectObject(memDc, dib);
-    RenderPanelToDib(&L, memDc, (uint32_t*)rawBits);
-    BitBlt(outDc, 0, 0, L.w, L.h, memDc, 0, 0, SRCCOPY);
-    SelectObject(memDc, oldBmp);
-    DeleteObject(dib);
-    DeleteDC(memDc);
-}
-
 // ============================================================================
 // Window Visibility, DWM Styling & Event Handling
 // ============================================================================
