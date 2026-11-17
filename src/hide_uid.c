@@ -1,5 +1,5 @@
 // ============================================================================
-// EFF-EFMI-Compatibility-Plugin (hide_uid.c) v1.2.0
+// EFF-EFMI-Compatibility-Plugin (hide_uid.c) v1.2.1
 // https://github.com/BakaMai/EFF-EFMI-Compatibility-Plugin
 // ============================================================================
 // Coexistence bridge & live-toggle UID/Name hider for Arknights: Endfield
@@ -13,7 +13,9 @@
 //      menus from blowing up in scale.
 //   3) Provides a 3-layer IL2CPP UID / Name hider with a pure Win32 + DWM + GDI
 //      [HOME] GUI control panel (zero DX11, zero SwapChain, zero WndProc hook)
-//      for instant live toggling without any resolution or EFF menu conflicts.
+//      hardened for marathon 24h+ sessions (strict main-thread lock-free hooks,
+//      weak GCHandles, hardware SEH / VirtualQuery page validation, and zero
+//      steady-state GC allocations).
 // ============================================================================
 
 #define _CRT_SECURE_NO_WARNINGS
@@ -30,7 +32,7 @@
 #include "gui_panel.h"
 
 // ============================================================================
-// Globals & Logging
+// Globals & Non-Blocking Logging
 // ============================================================================
 
 static HMODULE          g_hSelfModule    = NULL;
@@ -70,9 +72,10 @@ static void Log(const char* fmt, ...) {
     buf[total++] = '\n';
     buf[total]   = '\0';
 
+    // WriteFile goes straight to the OS kernel file cache (survives process crashes)
+    // without issuing synchronous FlushFileBuffers hardware/minifilter stalls.
     DWORD written = 0;
     WriteFile(g_hLogFile, buf, (DWORD)total, &written, NULL);
-    FlushFileBuffers(g_hLogFile);
     LeaveCriticalSection(&g_logLock);
 }
 
@@ -131,6 +134,7 @@ IL2CPP_DECL(void*,       il2cpp_runtime_invoke, void*, void*, void**, void**);
 IL2CPP_DECL(void*,       il2cpp_object_unbox, void*);
 IL2CPP_DECL(void*,       il2cpp_string_new, const char*);
 IL2CPP_DECL(uint32_t,    il2cpp_gchandle_new, void*, int);
+IL2CPP_DECL(uint32_t,    il2cpp_gchandle_new_weakref, void*, int);
 IL2CPP_DECL(void,        il2cpp_gchandle_free, uint32_t);
 IL2CPP_DECL(void*,       il2cpp_gchandle_get_target, uint32_t);
 
@@ -139,34 +143,34 @@ IL2CPP_DECL(void*,       il2cpp_gchandle_get_target, uint32_t);
 static HMODULE g_hGameAssembly = NULL;
 
 // Resolved IL2CPP MethodInfo* and offsets
-static void*  g_methodGameObjectSetActive            = NULL;
-static void*  g_methodGameObjectGetActiveSelf        = NULL;
-static void*  g_methodGameObjectGetActiveInHierarchy = NULL;
-static void*  g_methodGameObjectGetTransform         = NULL;
-static void*  g_methodGameObjectFind                 = NULL;
-static void*  g_methodComponentGetGameObject         = NULL;
-static void*  g_methodComponentGetTransform          = NULL;
-static void*  g_methodObjectGetName                  = NULL;
-static void*  g_methodTransformGetParent             = NULL;
-static void*  g_methodTransformFind                  = NULL;
-static void*  g_methodTMPSetText                     = NULL;
-static void*  g_methodTMPSetMaxVisibleChars          = NULL;
-static void*  g_methodSetAllDirty                    = NULL;
-static void*  g_methodForceMeshUpdate2               = NULL;
-static void*  g_methodForceMeshUpdate0               = NULL;
-static void*  g_methodRebuild                        = NULL;
-static void*  g_methodGraphicGetCanvasRenderer       = NULL;
-static void*  g_methodCanvasRendererSetCull          = NULL;
-static void*  g_methodGenerateTextMesh               = NULL;
-static void*  g_methodCanvasWillRender               = NULL;
-static void*  g_methodEventSystemUpdate              = NULL;
-static void*  g_methodInternalApplicationQuit        = NULL;
+static void*  g_methodGameObjectSetActive              = NULL;
+static void*  g_methodGameObjectGetActiveSelf          = NULL;
+static void*  g_methodGameObjectGetActiveInHierarchy   = NULL;
+static void*  g_methodGameObjectGetTransform           = NULL;
+static void*  g_methodGameObjectFind                   = NULL;
+static void*  g_methodComponentGetGameObject           = NULL;
+static void*  g_methodComponentGetTransform            = NULL;
+static void*  g_methodObjectGetName                    = NULL;
+static void*  g_methodTransformGetParent               = NULL;
+static void*  g_methodTransformFind                    = NULL;
+static void*  g_methodTMPSetText                       = NULL;
+static void*  g_methodTMPSetMaxVisibleChars            = NULL;
+static void*  g_methodSetAllDirty                      = NULL;
+static void*  g_methodForceMeshUpdate2                 = NULL;
+static void*  g_methodForceMeshUpdate0                 = NULL;
+static void*  g_methodRebuild                          = NULL;
+static void*  g_methodGraphicGetCanvasRenderer         = NULL;
+static void*  g_methodCanvasRendererSetCull            = NULL;
+static void*  g_methodGenerateTextMesh                 = NULL;
+static void*  g_methodCanvasWillRender                 = NULL;
+static void*  g_methodEventSystemUpdate                = NULL;
+static void*  g_methodInternalApplicationQuit          = NULL;
 
-static size_t g_offsetCachedPtr                      = 0x10;
-static size_t g_offsetMaxVisibleCharacters           = (size_t)-1;
-static size_t g_offsetHavePropertiesChanged          = (size_t)-1;
+static size_t g_offsetCachedPtr                        = 0x10;
+static size_t g_offsetMaxVisibleCharacters             = (size_t)-1;
+static size_t g_offsetHavePropertiesChanged            = (size_t)-1;
 
-// Active config flags (shared with gui_panel.h)
+// Active config flags (shared with gui_panel.h via atomic InterlockedExchange)
 volatile LONG g_uidHidden      = 1;
 volatile LONG g_pingHidden     = 0;
 volatile LONG g_menuUidHidden  = 1;
@@ -198,10 +202,22 @@ static tTMPVoidMethod    g_origEventSystemUpdate   = NULL;
 static tIl2CppShutdown   g_origIl2CppShutdown      = NULL;
 static tAppQuit          g_origAppQuit             = NULL;
 
+// Pre-allocated pinned Il2CppString* constants (created once at init; zero runtime string GC!)
 static void*             g_cachedEmptyStr          = NULL;
 static uint32_t          g_emptyStrHandle          = 0;
 
-// Watermark SetActive GCHandles (main thread only)
+static void*             g_strWatermarkUidFull     = NULL;
+static uint32_t          g_strWatermarkUidFullH    = 0;
+static void*             g_strWatermarkPingFull    = NULL;
+static uint32_t          g_strWatermarkPingFullH   = 0;
+static void*             g_strWatermarkParent      = NULL;
+static uint32_t          g_strWatermarkParentH     = 0;
+static void*             g_strChildText            = NULL;
+static uint32_t          g_strChildTextH           = 0;
+static void*             g_strChildPingCon         = NULL;
+static uint32_t          g_strChildPingConH        = 0;
+
+// Watermark SetActive weak GCHandles (strictly accessed on Unity main thread only)
 static uint32_t          g_uidTextHandle           = 0;
 static uint32_t          g_uidPingHandle           = 0;
 static int               g_uidTouchedByUs          = 0;
@@ -248,22 +264,194 @@ static void OnPanelConfigChanged(void) {
 }
 
 // ============================================================================
-// Safe Memory & IL2CPP Helpers (Zero-Exception Pointer Validation + SafeInvoke)
+// GCHandle & Hardware-Protected Memory Helpers (SEH + VirtualQuery Page Guard)
 // ============================================================================
+
+static uint32_t NewWeakGcHandle(void* obj) {
+    if (!obj || g_hookDisabled) return 0;
+    if (p_il2cpp_gchandle_new_weakref) {
+        return p_il2cpp_gchandle_new_weakref(obj, 0);
+    }
+    if (p_il2cpp_gchandle_new) {
+        return p_il2cpp_gchandle_new(obj, 0);
+    }
+    return 0;
+}
+
+static uint32_t NewPinnedStaticStrHandle(const char* utf8, void** outStr) {
+    if (outStr) *outStr = NULL;
+    if (!utf8 || !p_il2cpp_string_new || !p_il2cpp_gchandle_new) return 0;
+    void* s = p_il2cpp_string_new(utf8);
+    if (!s) return 0;
+    uint32_t h = p_il2cpp_gchandle_new(s, 0);
+    if (outStr) *outStr = s;
+    return h;
+}
+
+static void FreeGcHandleSafe(uint32_t* ioHandle) {
+    if (ioHandle && *ioHandle) {
+        uint32_t h = *ioHandle;
+        *ioHandle = 0;
+        if (!g_hookDisabled && p_il2cpp_gchandle_free) {
+            p_il2cpp_gchandle_free(h);
+        }
+    }
+}
+
+static void* GetGcHandleTarget(uint32_t handle) {
+    if (!handle || g_hookDisabled || !p_il2cpp_gchandle_get_target) return NULL;
+    return p_il2cpp_gchandle_get_target(handle);
+}
 
 static int IsValidUserPtr(const void* p, size_t bytes) {
     uintptr_t addr = (uintptr_t)p;
     if (addr < 0x10000u) return 0;
-    if (addr > 0x00007FFFFFFFFFFFull) return 0;
-    if (bytes > 0x00007FFFFFFFFFFFull - addr) return 0;
+    if (addr > 0x00007FFFFFFEFFFFull) return 0;
+    if (bytes > (0x00007FFFFFFEFFFFull - addr) + 1u) return 0;
     return 1;
+}
+
+#if !(defined(_MSC_VER) && !defined(__clang__))
+static int IsCommittedMemoryRange(const void* p, size_t bytes, int requireWrite) {
+    if (!IsValidUserPtr(p, bytes)) return 0;
+    if (bytes == 0) return 1;
+    uintptr_t cur = (uintptr_t)p;
+    uintptr_t end = cur + bytes;
+    if (end < cur) return 0;
+
+    const DWORD readMask  = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                            PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    const DWORD writeMask = PAGE_READWRITE | PAGE_WRITECOPY |
+                            PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    const DWORD reqMask   = requireWrite ? writeMask : readMask;
+
+    while (cur < end) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (VirtualQuery((LPCVOID)cur, &mbi, sizeof(mbi)) == 0) return 0;
+        if (mbi.State != MEM_COMMIT) return 0;
+        if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return 0;
+        if ((mbi.Protect & reqMask) == 0) return 0;
+        uintptr_t regionEnd = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+        if (regionEnd <= cur) return 0;
+        cur = regionEnd;
+    }
+    return 1;
+}
+#endif
+
+static int SafeReadPtr(const void* addr, uintptr_t* outVal) {
+    if (outVal) *outVal = 0;
+    if (!IsValidUserPtr(addr, sizeof(uintptr_t))) return 0;
+#if defined(_MSC_VER) && !defined(__clang__)
+    __try {
+        uintptr_t v = *(const uintptr_t*)addr;
+        if (outVal) *outVal = v;
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+#else
+    if (!IsCommittedMemoryRange(addr, sizeof(uintptr_t), 0)) return 0;
+    uintptr_t v = *(const uintptr_t*)addr;
+    if (outVal) *outVal = v;
+    return 1;
+#endif
+}
+
+static int SafeReadInt32(const void* addr, int32_t* outVal) {
+    if (outVal) *outVal = 0;
+    if (!IsValidUserPtr(addr, sizeof(int32_t))) return 0;
+#if defined(_MSC_VER) && !defined(__clang__)
+    __try {
+        int32_t v = *(const int32_t*)addr;
+        if (outVal) *outVal = v;
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+#else
+    if (!IsCommittedMemoryRange(addr, sizeof(int32_t), 0)) return 0;
+    int32_t v = *(const int32_t*)addr;
+    if (outVal) *outVal = v;
+    return 1;
+#endif
+}
+
+static int SafeReadUInt8(const void* addr, uint8_t* outVal) {
+    if (outVal) *outVal = 0;
+    if (!IsValidUserPtr(addr, sizeof(uint8_t))) return 0;
+#if defined(_MSC_VER) && !defined(__clang__)
+    __try {
+        uint8_t v = *(const uint8_t*)addr;
+        if (outVal) *outVal = v;
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+#else
+    if (!IsCommittedMemoryRange(addr, sizeof(uint8_t), 0)) return 0;
+    uint8_t v = *(const uint8_t*)addr;
+    if (outVal) *outVal = v;
+    return 1;
+#endif
+}
+
+static int SafeWriteInt32(void* addr, int32_t val) {
+    if (!IsValidUserPtr(addr, sizeof(int32_t))) return 0;
+#if defined(_MSC_VER) && !defined(__clang__)
+    __try {
+        *(volatile LONG*)addr = (LONG)val;
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+#else
+    if (!IsCommittedMemoryRange(addr, sizeof(int32_t), 1)) return 0;
+    *(volatile LONG*)addr = (LONG)val;
+    return 1;
+#endif
+}
+
+static int SafeWriteUInt8(void* addr, uint8_t val) {
+    if (!IsValidUserPtr(addr, sizeof(uint8_t))) return 0;
+#if defined(_MSC_VER) && !defined(__clang__)
+    __try {
+        *(volatile uint8_t*)addr = val;
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+#else
+    if (!IsCommittedMemoryRange(addr, sizeof(uint8_t), 1)) return 0;
+    *(volatile uint8_t*)addr = val;
+    return 1;
+#endif
+}
+
+static int SafeCopyWideChars(const wchar_t* src, wchar_t* dst, size_t count) {
+    size_t bytes = count * sizeof(wchar_t);
+    if (!IsValidUserPtr(src, bytes)) return 0;
+#if defined(_MSC_VER) && !defined(__clang__)
+    __try {
+        memcpy(dst, src, bytes);
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+#else
+    if (!IsCommittedMemoryRange(src, bytes, 0)) return 0;
+    memcpy(dst, src, bytes);
+    return 1;
+#endif
 }
 
 static uintptr_t GetUnityCachedPtr(const void* unityObj) {
     if (!IsValidUserPtr(unityObj, g_offsetCachedPtr + sizeof(uintptr_t))) return 0;
-    uintptr_t klass = *(const uintptr_t*)unityObj;
+    uintptr_t klass = 0;
+    if (!SafeReadPtr(unityObj, &klass)) return 0;
     if (!IsValidUserPtr((const void*)klass, sizeof(void*))) return 0;
-    uintptr_t cachedPtr = *(const uintptr_t*)((const char*)unityObj + g_offsetCachedPtr);
+    uintptr_t cachedPtr = 0;
+    if (!SafeReadPtr((const char*)unityObj + g_offsetCachedPtr, &cachedPtr)) return 0;
     if (!IsValidUserPtr((const void*)cachedPtr, sizeof(void*))) return 0;
     return cachedPtr;
 }
@@ -273,25 +461,27 @@ static int IsUnityObjectAlive(const void* unityObj) {
 }
 
 static int ReadIL2CppString(const void* str, char* buf, int bufSz) {
-    if (!str || bufSz <= 1) {
+    if (!str || !buf || bufSz <= 1) {
         if (buf && bufSz > 0) buf[0] = '\0';
         return -1;
     }
-    if (!IsValidUserPtr(str, 20)) {
+    int32_t len = 0;
+    if (!SafeReadInt32((const char*)str + 16, &len)) {
         buf[0] = '\0';
         return -1;
     }
-    int32_t len = *(const int32_t*)((const char*)str + 16);
-    if (len <= 0 || len > 2048) {
+    if (len <= 0 || len > 512) {
         buf[0] = '\0';
         return -1;
     }
+    wchar_t localChars[513];
     const wchar_t* chars = (const wchar_t*)((const char*)str + 20);
-    if (!IsValidUserPtr(chars, (size_t)len * sizeof(wchar_t))) {
+    if (!SafeCopyWideChars(chars, localChars, (size_t)len)) {
         buf[0] = '\0';
         return -1;
     }
-    int n = WideCharToMultiByte(CP_UTF8, 0, chars, len, buf, bufSz - 1, NULL, NULL);
+    localChars[len] = L'\0';
+    int n = WideCharToMultiByte(CP_UTF8, 0, localChars, len, buf, bufSz - 1, NULL, NULL);
     if (n <= 0) {
         buf[0] = '\0';
         return -1;
@@ -317,13 +507,19 @@ static void* SafeInvoke(void* method, void* obj, void** params, int* outHadExcep
 static int SafeUnboxBool(void* boxedBool, int fallback) {
     if (!boxedBool || !p_il2cpp_object_unbox) return fallback;
     void* ptr = p_il2cpp_object_unbox(boxedBool);
-    if (!IsValidUserPtr(ptr, 1)) return fallback;
-    return (*(const uint8_t*)ptr) != 0;
+    uint8_t b = 0;
+    if (!SafeReadUInt8(ptr, &b)) return fallback;
+    return b != 0;
 }
 
 // ============================================================================
-// Component Classification & Fast-Path Seen-Table + Live Target Cache
+// Component Classification & Lock-Free Main-Thread Seen-Table + Weak Cache
 // ============================================================================
+// IMPORTANT THREADING INVARIANT:
+//   g_seenTable and g_compCache are ONLY read or modified on g_mainThreadId!
+//   Every hook checks `GetCurrentThreadId() == g_mainThreadId` BEFORE entering,
+//   eliminating all SRWLOCKs and preventing any lock-order inversion with
+//   IL2CPP's Boehm GC Stop-The-World (SuspendThread).
 
 typedef enum HideType {
     HT_NONE           = 0,
@@ -339,26 +535,26 @@ typedef enum HideType {
 #define SEEN_NON_TARGET  -1
 
 typedef struct SeenEntry {
-    const void* comp;
-    uintptr_t   cachedPtr;
-    int         tag; // SEEN_EMPTY (0), SEEN_NON_TARGET (-1), or (int)HideType (1..6)
+    uintptr_t compAddr;  // Integer key ONLY -- NEVER dereferenced!
+    uintptr_t cachedPtr;
+    int       tag;       // SEEN_EMPTY (0), SEEN_NON_TARGET (-1), or (int)HideType (1..6)
 } SeenEntry;
 
-#define SEEN_TABLE_CAP 1024
+#define SEEN_TABLE_CAP 4096
 static SeenEntry g_seenTable[SEEN_TABLE_CAP];
+static uint32_t  g_seenEvictCursor = 0;
 
 typedef struct CachedComp {
-    void*     comp;
+    uintptr_t compKey;        // Last observed address key ONLY -- NEVER dereferenced directly!
     uintptr_t cachedPtr;
     HideType  type;
-    uint32_t  gchandle;
-    uint32_t  origTextHandle;
+    uint32_t  gchandle;       // Weak GCHandle to TMP_Text (returns NULL once GC collects UI)
+    uint32_t  origTextHandle; // Weak GCHandle to original Il2CppString*
     int       origMaxVisible;
 } CachedComp;
 
 #define COMP_CACHE_CAP 64
 static CachedComp g_compCache[COMP_CACHE_CAP];
-static SRWLOCK    g_cacheLock = SRWLOCK_INIT;
 
 static int IsHideActive(HideType t) {
     switch (t) {
@@ -372,165 +568,188 @@ static int IsHideActive(HideType t) {
     }
 }
 
-static uint32_t HashCompPair(const void* comp, uintptr_t cachedPtr) {
-    uint64_t x = ((uint64_t)(uintptr_t)comp >> 4) ^ ((uint64_t)cachedPtr * 11400714819323198485ull);
+static uint32_t HashCompPair(uintptr_t compAddr, uintptr_t cachedPtr) {
+    uint64_t x = ((uint64_t)compAddr >> 4) ^ ((uint64_t)cachedPtr * 11400714819323198485ull);
     x ^= x >> 33;
     return (uint32_t)x;
 }
 
 static int LookupSeenComp(const void* comp, uintptr_t cachedPtr, HideType* outType) {
-    uint32_t base = HashCompPair(comp, cachedPtr) & (SEEN_TABLE_CAP - 1);
-    int result = SEEN_EMPTY;
-    AcquireSRWLockShared(&g_cacheLock);
+    uintptr_t compAddr = (uintptr_t)comp;
+    uint32_t base = HashCompPair(compAddr, cachedPtr) & (SEEN_TABLE_CAP - 1);
     for (uint32_t probe = 0; probe < 4; probe++) {
         const SeenEntry* e = &g_seenTable[(base + probe) & (SEEN_TABLE_CAP - 1)];
-        if (e->comp == comp && e->cachedPtr == cachedPtr && e->tag != SEEN_EMPTY) {
-            result = e->tag;
-            if (result > 0 && outType) {
-                *outType = (HideType)result;
+        if (e->compAddr == compAddr && e->cachedPtr == cachedPtr && e->tag != SEEN_EMPTY) {
+            if (e->tag > 0 && outType) {
+                *outType = (HideType)e->tag;
             }
-            break;
+            return e->tag;
         }
     }
-    ReleaseSRWLockShared(&g_cacheLock);
-    return result;
+    return SEEN_EMPTY;
 }
 
-static void RecordSeenComp(const void* comp, uintptr_t cachedPtr, int tag) {
-    uint32_t base = HashCompPair(comp, cachedPtr) & (SEEN_TABLE_CAP - 1);
-    AcquireSRWLockExclusive(&g_cacheLock);
+static void RecordSeenComp(uintptr_t compAddr, uintptr_t cachedPtr, int tag) {
+    uint32_t base = HashCompPair(compAddr, cachedPtr) & (SEEN_TABLE_CAP - 1);
     uint32_t targetSlot = base;
     int foundSlot = 0;
+
     for (uint32_t probe = 0; probe < 4; probe++) {
         uint32_t idx = (base + probe) & (SEEN_TABLE_CAP - 1);
-        if ((g_seenTable[idx].comp == comp && g_seenTable[idx].cachedPtr == cachedPtr) ||
+        if ((g_seenTable[idx].compAddr == compAddr && g_seenTable[idx].cachedPtr == cachedPtr) ||
             g_seenTable[idx].tag == SEEN_EMPTY) {
             targetSlot = idx;
             foundSlot = 1;
             break;
         }
     }
+
     if (!foundSlot) {
-        // Prefer overwriting a non-target or dead slot rather than a live tracked target
+        // NEVER dereference historical compAddr pointers in g_seenTable (Boehm GC may
+        // have unmapped their 4KB pages after hours of play!). Prefer overwriting any
+        // non-target slot, or round-robin if all 4 slots hold target tags.
+        int foundNonTarget = 0;
         for (uint32_t probe = 0; probe < 4; probe++) {
             uint32_t idx = (base + probe) & (SEEN_TABLE_CAP - 1);
-            if (g_seenTable[idx].tag <= 0 || !IsUnityObjectAlive(g_seenTable[idx].comp)) {
+            if (g_seenTable[idx].tag <= 0) {
                 targetSlot = idx;
+                foundNonTarget = 1;
                 break;
             }
         }
+        if (!foundNonTarget) {
+            targetSlot = (base + (g_seenEvictCursor++ & 3u)) & (SEEN_TABLE_CAP - 1);
+        }
     }
-    g_seenTable[targetSlot].comp      = comp;
-    g_seenTable[targetSlot].cachedPtr = cachedPtr;
-    g_seenTable[targetSlot].tag       = tag;
-    ReleaseSRWLockExclusive(&g_cacheLock);
+
+    if (tag == SEEN_EMPTY) {
+        g_seenTable[targetSlot].compAddr  = 0;
+        g_seenTable[targetSlot].cachedPtr = 0;
+        g_seenTable[targetSlot].tag       = SEEN_EMPTY;
+    } else {
+        g_seenTable[targetSlot].compAddr  = compAddr;
+        g_seenTable[targetSlot].cachedPtr = cachedPtr;
+        g_seenTable[targetSlot].tag       = tag;
+    }
 }
 
-static void ClearCachedCompEntryLocked(int idx) {
-    if (g_compCache[idx].gchandle && p_il2cpp_gchandle_free) {
-        p_il2cpp_gchandle_free(g_compCache[idx].gchandle);
-    }
-    if (g_compCache[idx].origTextHandle && p_il2cpp_gchandle_free) {
-        p_il2cpp_gchandle_free(g_compCache[idx].origTextHandle);
-    }
+static void ClearCachedCompEntry(int idx) {
+    uintptr_t oldComp   = g_compCache[idx].compKey;
+    uintptr_t oldCached = g_compCache[idx].cachedPtr;
+    FreeGcHandleSafe(&g_compCache[idx].gchandle);
+    FreeGcHandleSafe(&g_compCache[idx].origTextHandle);
     memset(&g_compCache[idx], 0, sizeof(CachedComp));
+    if (oldComp && oldCached) {
+        RecordSeenComp(oldComp, oldCached, SEEN_EMPTY);
+    }
+}
+
+// Safely resolves a cached component via its Weak GCHandle without touching freed pages.
+// Automatically purges the slot if the Unity object was destroyed or GC-collected.
+static void* ResolveLiveCachedComp(int idx) {
+    if (!g_compCache[idx].gchandle) return NULL;
+    void* liveObj = GetGcHandleTarget(g_compCache[idx].gchandle);
+    if (!liveObj || !IsUnityObjectAlive(liveObj)) {
+        ClearCachedCompEntry(idx);
+        return NULL;
+    }
+    g_compCache[idx].compKey = (uintptr_t)liveObj;
+    return liveObj;
 }
 
 static int ReadCompMaxVisibleChars(const void* comp, int fallback) {
     if (!comp || g_offsetMaxVisibleCharacters == (size_t)-1) return fallback;
-    const char* addr = (const char*)comp + g_offsetMaxVisibleCharacters;
-    if (!IsValidUserPtr(addr, sizeof(int))) return fallback;
-    int v = *(const int*)addr;
-    return (v > 0) ? v : fallback;
+    int32_t v = 0;
+    if (!SafeReadInt32((const char*)comp + g_offsetMaxVisibleCharacters, &v)) {
+        return fallback;
+    }
+    return (v > 0) ? (int)v : fallback;
 }
 
 static void StoreCachedComp(void* comp, uintptr_t cachedPtr, HideType type, const char* debugName) {
-    if (!comp || !cachedPtr || !p_il2cpp_gchandle_new || g_hookDisabled) return;
+    if (!comp || !cachedPtr || g_hookDisabled) return;
 
     int initialMaxVis = ReadCompMaxVisibleChars(comp, 99999);
-    int inserted = 0;
-
-    AcquireSRWLockExclusive(&g_cacheLock);
     int freeIdx = -1;
+
     for (int i = 0; i < COMP_CACHE_CAP; i++) {
-        if (g_compCache[i].comp != NULL && !IsUnityObjectAlive(g_compCache[i].comp)) {
-            ClearCachedCompEntryLocked(i);
-        }
-        if (g_compCache[i].comp == comp && g_compCache[i].cachedPtr == cachedPtr) {
-            g_compCache[i].type = type;
-            ReleaseSRWLockExclusive(&g_cacheLock);
-            return;
-        }
-        if (freeIdx < 0 && g_compCache[i].comp == NULL) {
+        void* existing = ResolveLiveCachedComp(i);
+        if (existing) {
+            if (existing == comp && g_compCache[i].cachedPtr == cachedPtr) {
+                g_compCache[i].type = type;
+                return;
+            }
+        } else if (freeIdx < 0) {
             freeIdx = i;
         }
     }
+
     if (freeIdx >= 0) {
-        uint32_t h = p_il2cpp_gchandle_new(comp, 0);
+        uint32_t h = NewWeakGcHandle(comp);
         if (h != 0) {
-            g_compCache[freeIdx].comp           = comp;
+            g_compCache[freeIdx].compKey        = (uintptr_t)comp;
             g_compCache[freeIdx].cachedPtr      = cachedPtr;
             g_compCache[freeIdx].type           = type;
             g_compCache[freeIdx].gchandle       = h;
             g_compCache[freeIdx].origTextHandle = 0;
             g_compCache[freeIdx].origMaxVisible = initialMaxVis;
-            inserted = 1;
-        }
-    }
-    ReleaseSRWLockExclusive(&g_cacheLock);
 
-    if (inserted) {
-        Log("[HideUID] Tracked target TMP_Text: name='%s' type=%d comp=%p",
-            debugName ? debugName : "?", (int)type, comp);
+            // If a brand-new Watermark UID / Ping component just spawned (e.g. Login -> World),
+            // wake up PumpMainThreadSync on the next frame to apply SetActive immediately!
+            if (type == HT_WATERMARK_UID || type == HT_WATERMARK_PING) {
+                g_watermarkSynced = 0;
+                g_nextWatermarkProbeTick = 0;
+            }
+
+            Log("[HideUID] Tracked target TMP_Text: name='%s' type=%d comp=%p",
+                debugName ? debugName : "?", (int)type, comp);
+        }
     }
 }
 
-static void UpdateCachedOrigMaxVisible(const void* comp, int maxVis) {
+static void UpdateCachedOrigMaxVisible(const void* comp, uintptr_t cachedPtr, int maxVis) {
     if (maxVis <= 0) return;
-    AcquireSRWLockExclusive(&g_cacheLock);
+    uintptr_t key = (uintptr_t)comp;
     for (int i = 0; i < COMP_CACHE_CAP; i++) {
-        if (g_compCache[i].comp == comp) {
+        if (g_compCache[i].gchandle &&
+            g_compCache[i].compKey == key &&
+            g_compCache[i].cachedPtr == cachedPtr) {
             g_compCache[i].origMaxVisible = maxVis;
             break;
         }
     }
-    ReleaseSRWLockExclusive(&g_cacheLock);
 }
 
-static int GetCachedOrigMaxVisible(const void* comp) {
-    int res = 99999;
-    AcquireSRWLockShared(&g_cacheLock);
+static int GetCachedOrigMaxVisible(const void* comp, uintptr_t cachedPtr) {
+    uintptr_t key = (uintptr_t)comp;
     for (int i = 0; i < COMP_CACHE_CAP; i++) {
-        if (g_compCache[i].comp == comp && g_compCache[i].origMaxVisible > 0) {
-            res = g_compCache[i].origMaxVisible;
-            break;
+        if (g_compCache[i].gchandle &&
+            g_compCache[i].compKey == key &&
+            g_compCache[i].cachedPtr == cachedPtr &&
+            g_compCache[i].origMaxVisible > 0) {
+            return g_compCache[i].origMaxVisible;
         }
     }
-    ReleaseSRWLockShared(&g_cacheLock);
-    return res;
+    return 99999;
 }
 
-static void RecordOriginalCompText(void* comp, void* strObj) {
-    if (!comp || !strObj || strObj == g_cachedEmptyStr ||
-        !p_il2cpp_gchandle_new || g_hookDisabled) {
+static void RecordOriginalCompText(void* comp, uintptr_t cachedPtr, void* strObj) {
+    if (!comp || !strObj || strObj == g_cachedEmptyStr || g_hookDisabled) {
         return;
     }
-    AcquireSRWLockExclusive(&g_cacheLock);
+    uintptr_t key = (uintptr_t)comp;
     for (int i = 0; i < COMP_CACHE_CAP; i++) {
-        if (g_compCache[i].comp == comp) {
-            void* prev = (g_compCache[i].origTextHandle && p_il2cpp_gchandle_get_target)
-                             ? p_il2cpp_gchandle_get_target(g_compCache[i].origTextHandle)
-                             : NULL;
+        if (g_compCache[i].gchandle &&
+            g_compCache[i].compKey == key &&
+            g_compCache[i].cachedPtr == cachedPtr) {
+            void* prev = GetGcHandleTarget(g_compCache[i].origTextHandle);
             if (prev != strObj) {
-                if (g_compCache[i].origTextHandle && p_il2cpp_gchandle_free) {
-                    p_il2cpp_gchandle_free(g_compCache[i].origTextHandle);
-                }
-                g_compCache[i].origTextHandle = p_il2cpp_gchandle_new(strObj, 0);
+                FreeGcHandleSafe(&g_compCache[i].origTextHandle);
+                g_compCache[i].origTextHandle = NewWeakGcHandle(strObj);
             }
             break;
         }
     }
-    ReleaseSRWLockExclusive(&g_cacheLock);
 }
 
 enum IdentityAncestorFlag {
@@ -572,12 +791,15 @@ static unsigned GetIdentityAncestorFlagsSafe(void* component) {
     return flags;
 }
 
-static int IdentifyTargetComponent(void* component, HideType* outType) {
+static int IdentifyTargetComponent(void* component, HideType* outType, uintptr_t* outCachedPtr) {
     if (outType) *outType = HT_NONE;
+    if (outCachedPtr) *outCachedPtr = 0;
     if (!component || g_hookDisabled) return 0;
+    if (g_mainThreadId == 0 || GetCurrentThreadId() != g_mainThreadId) return 0;
 
     uintptr_t cachedPtr = GetUnityCachedPtr(component);
     if (cachedPtr == 0) return 0;
+    if (outCachedPtr) *outCachedPtr = cachedPtr;
 
     int seen = LookupSeenComp(component, cachedPtr, outType);
     if (seen > 0) return 1;
@@ -585,21 +807,21 @@ static int IdentifyTargetComponent(void* component, HideType* outType) {
 
     // Slow-path inspection runs ONCE per unique (comp, cachedPtr) on the Unity main thread
     // via SafeInvoke so managed exceptions are 100% caught inside GameAssembly.dll.
-    if (g_mainThreadId == 0 || GetCurrentThreadId() != g_mainThreadId ||
-        !g_methodComponentGetGameObject || !g_methodObjectGetName) {
+    if (!g_methodComponentGetGameObject || !g_methodObjectGetName) {
         return 0;
     }
 
+    uintptr_t compAddr = (uintptr_t)component;
     void* go = SafeInvoke(g_methodComponentGetGameObject, component, NULL, NULL);
     if (!IsUnityObjectAlive(go)) {
-        RecordSeenComp(component, cachedPtr, SEEN_NON_TARGET);
+        RecordSeenComp(compAddr, cachedPtr, SEEN_NON_TARGET);
         return 0;
     }
 
     void* nameStr = SafeInvoke(g_methodObjectGetName, go, NULL, NULL);
     char name[64];
     if (!nameStr || ReadIL2CppString(nameStr, name, sizeof(name)) <= 0) {
-        RecordSeenComp(component, cachedPtr, SEEN_NON_TARGET);
+        RecordSeenComp(compAddr, cachedPtr, SEEN_NON_TARGET);
         return 0;
     }
 
@@ -639,13 +861,13 @@ static int IdentifyTargetComponent(void* component, HideType* outType) {
     }
 
     if (matched) {
-        RecordSeenComp(component, cachedPtr, (int)matchedType);
+        RecordSeenComp(compAddr, cachedPtr, (int)matchedType);
         StoreCachedComp(component, cachedPtr, matchedType, name);
-        *outType = matchedType;
+        if (outType) *outType = matchedType;
         return 1;
     }
 
-    RecordSeenComp(component, cachedPtr, SEEN_NON_TARGET);
+    RecordSeenComp(compAddr, cachedPtr, SEEN_NON_TARGET);
     return 0;
 }
 
@@ -671,63 +893,43 @@ static int IsParentActiveInHierarchy(void* go) {
     return SafeUnboxBool(boxed, 1);
 }
 
-static void* FindWatermarkTargetGo(const char* fullPath,
-                                   const char* parentPath,
-                                   const char* childName,
+static void* FindWatermarkTargetGo(void* sFull,
+                                   void* sParent,
+                                   void* sChild,
                                    HideType fallbackType) {
-    if (!p_il2cpp_string_new) return NULL;
-
-    // 1. Direct GameObject.Find(fullPath) when target is active
-    if (g_methodGameObjectFind) {
-        void* sFull = p_il2cpp_string_new(fullPath);
-        if (sFull) {
-            void* args[1] = { sFull };
-            void* go = SafeInvoke(g_methodGameObjectFind, NULL, args, NULL);
-            if (IsUnityObjectAlive(go)) return go;
-        }
+    // 1. Direct GameObject.Find(fullPath) when target is active (uses pre-pinned Il2CppString*)
+    if (g_methodGameObjectFind && sFull) {
+        void* args[1] = { sFull };
+        void* go = SafeInvoke(g_methodGameObjectFind, NULL, args, NULL);
+        if (IsUnityObjectAlive(go)) return go;
     }
 
     // 2. Parent GameObject.Find(parentPath) + Transform.Find(childName)
     //    Finds the child EVEN WHEN SetActive(false) made it inactive!
     if (g_methodGameObjectFind && g_methodGameObjectGetTransform &&
-        g_methodTransformFind && g_methodComponentGetGameObject) {
-        void* sParent = p_il2cpp_string_new(parentPath);
-        void* sChild  = p_il2cpp_string_new(childName);
-        if (sParent && sChild) {
-            void* findArgs[1] = { sParent };
-            void* parentGo = SafeInvoke(g_methodGameObjectFind, NULL, findArgs, NULL);
-            if (IsUnityObjectAlive(parentGo)) {
-                void* parentTr = SafeInvoke(g_methodGameObjectGetTransform, parentGo, NULL, NULL);
-                if (IsUnityObjectAlive(parentTr)) {
-                    void* trArgs[1] = { sChild };
-                    void* childTr = SafeInvoke(g_methodTransformFind, parentTr, trArgs, NULL);
-                    if (IsUnityObjectAlive(childTr)) {
-                        void* childGo = SafeInvoke(g_methodComponentGetGameObject, childTr, NULL, NULL);
-                        if (IsUnityObjectAlive(childGo)) return childGo;
-                    }
+        g_methodTransformFind && g_methodComponentGetGameObject && sParent && sChild) {
+        void* findArgs[1] = { sParent };
+        void* parentGo = SafeInvoke(g_methodGameObjectFind, NULL, findArgs, NULL);
+        if (IsUnityObjectAlive(parentGo)) {
+            void* parentTr = SafeInvoke(g_methodGameObjectGetTransform, parentGo, NULL, NULL);
+            if (IsUnityObjectAlive(parentTr)) {
+                void* trArgs[1] = { sChild };
+                void* childTr = SafeInvoke(g_methodTransformFind, parentTr, trArgs, NULL);
+                if (IsUnityObjectAlive(childTr)) {
+                    void* childGo = SafeInvoke(g_methodComponentGetGameObject, childTr, NULL, NULL);
+                    if (IsUnityObjectAlive(childGo)) return childGo;
                 }
             }
         }
     }
 
-    // 3. Fallback via tracked TMP_Text component in g_compCache (prefer active parent panel)
+    // 3. Fallback via Weak-GCHandle tracked TMP_Text component in g_compCache
     if (g_methodComponentGetGameObject) {
-        void* candidates[COMP_CACHE_CAP];
-        int candCount = 0;
-        AcquireSRWLockShared(&g_cacheLock);
-        for (int i = 0; i < COMP_CACHE_CAP; i++) {
-            if (g_compCache[i].comp != NULL &&
-                g_compCache[i].type == fallbackType &&
-                IsUnityObjectAlive(g_compCache[i].comp)) {
-                candidates[candCount++] = g_compCache[i].comp;
-            }
-        }
-        ReleaseSRWLockShared(&g_cacheLock);
-
         void* firstAliveGo = NULL;
-        for (int c = 0; c < candCount; c++) {
-            void* matchedComp = candidates[c];
-            if (!IsUnityObjectAlive(matchedComp)) continue;
+        for (int i = 0; i < COMP_CACHE_CAP; i++) {
+            if (!g_compCache[i].gchandle || g_compCache[i].type != fallbackType) continue;
+            void* matchedComp = ResolveLiveCachedComp(i);
+            if (!matchedComp) continue;
 
             if (fallbackType == HT_WATERMARK_UID) {
                 void* go = SafeInvoke(g_methodComponentGetGameObject, matchedComp, NULL, NULL);
@@ -786,45 +988,39 @@ static int ApplyGoActiveIfNeeded(void* go, int wantVisible, const char* label) {
 }
 
 static int SetNodeActiveOnMainThread(uint32_t* ioHandle,
-                                     const char* fullPath,
-                                     const char* parentPath,
-                                     const char* childName,
+                                     void* sFull,
+                                     void* sParent,
+                                     void* sChild,
                                      HideType fallbackType,
                                      int wantVisible,
                                      const char* label) {
     if (g_hookDisabled || !g_methodGameObjectSetActive) return 0;
 
-    void* go = (*ioHandle && p_il2cpp_gchandle_get_target)
-                   ? p_il2cpp_gchandle_get_target(*ioHandle)
-                   : NULL;
+    void* go = GetGcHandleTarget(*ioHandle);
 
     // Discard stale handle if destroyed OR if its parent UIDPanelPanel was deactivated
     // (e.g. Login screen panel deactivated after entering the 3D game world)
     if (go && (!IsUnityObjectAlive(go) || !IsParentActiveInHierarchy(go))) {
-        if (*ioHandle && p_il2cpp_gchandle_free) {
-            p_il2cpp_gchandle_free(*ioHandle);
-        }
-        *ioHandle = 0;
+        FreeGcHandleSafe(ioHandle);
         go = NULL;
+    } else if (!go && *ioHandle) {
+        FreeGcHandleSafe(ioHandle);
     }
 
     if (!go) {
-        go = FindWatermarkTargetGo(fullPath, parentPath, childName, fallbackType);
+        go = FindWatermarkTargetGo(sFull, sParent, sChild, fallbackType);
         if (!go) return 0;
-        if (p_il2cpp_gchandle_new) {
-            *ioHandle = p_il2cpp_gchandle_new(go, 0);
-        }
+        *ioHandle = NewWeakGcHandle(go);
     }
 
     return ApplyGoActiveIfNeeded(go, wantVisible, label);
 }
 
-static void RefreshSingleTMPComponent(const CachedComp* entry) {
-    void* comp = entry->comp;
+static void RefreshSingleTMPComponent(void* comp, HideType type, int origMaxVisible, uint32_t origTextHandle) {
     if (!IsUnityObjectAlive(comp)) return;
 
-    int hide = IsHideActive(entry->type);
-    int targetMaxVis = hide ? 0 : (entry->origMaxVisible > 0 ? entry->origMaxVisible : 99999);
+    int hide = IsHideActive(type);
+    int targetMaxVis = hide ? 0 : (origMaxVisible > 0 ? origMaxVisible : 99999);
 
     // 1. Hardware CanvasRenderer batch cull toggle (0-frame GPU visibility guarantee
     //    even if UIText skips SetMesh on 0-vertex mesh Info, without altering layout!)
@@ -844,17 +1040,11 @@ static void RefreshSingleTMPComponent(const CachedComp* entry) {
             void* args[1] = { &mvArg };
             SafeInvoke(g_methodTMPSetMaxVisibleChars, comp, args, NULL);
         } else {
-            char* fieldAddr = (char*)comp + g_offsetMaxVisibleCharacters;
-            if (IsValidUserPtr(fieldAddr, sizeof(int))) {
-                *(int*)fieldAddr = targetMaxVis;
-            }
+            SafeWriteInt32((char*)comp + g_offsetMaxVisibleCharacters, (int32_t)targetMaxVis);
         }
 
         if (g_offsetHavePropertiesChanged != (size_t)-1) {
-            char* dirtyAddr = (char*)comp + g_offsetHavePropertiesChanged;
-            if (IsValidUserPtr(dirtyAddr, 1)) {
-                *(uint8_t*)dirtyAddr = 1;
-            }
+            SafeWriteUInt8((char*)comp + g_offsetHavePropertiesChanged, 1);
         }
 
         if (g_methodSetAllDirty) {
@@ -878,8 +1068,8 @@ static void RefreshSingleTMPComponent(const CachedComp* entry) {
         if (hide) {
             void* args[1] = { g_cachedEmptyStr };
             SafeInvoke(g_methodTMPSetText, comp, args, NULL);
-        } else if (entry->origTextHandle && p_il2cpp_gchandle_get_target) {
-            void* origStr = p_il2cpp_gchandle_get_target(entry->origTextHandle);
+        } else {
+            void* origStr = GetGcHandleTarget(origTextHandle);
             if (origStr) {
                 void* args[1] = { origStr };
                 SafeInvoke(g_methodTMPSetText, comp, args, NULL);
@@ -891,25 +1081,18 @@ static void RefreshSingleTMPComponent(const CachedComp* entry) {
 static void RefreshCachedTextComponentsOnMainThread(void) {
     if (g_hookDisabled) return;
 
-    CachedComp snap[COMP_CACHE_CAP];
-    int count = 0;
-
-    AcquireSRWLockExclusive(&g_cacheLock);
+    int syncedCount = 0;
     for (int i = 0; i < COMP_CACHE_CAP; i++) {
-        if (g_compCache[i].comp != NULL) {
-            if (!IsUnityObjectAlive(g_compCache[i].comp)) {
-                ClearCachedCompEntryLocked(i);
-                continue;
-            }
-            snap[count++] = g_compCache[i];
-        }
+        if (!g_compCache[i].gchandle) continue;
+        void* comp = ResolveLiveCachedComp(i);
+        if (!comp) continue;
+        RefreshSingleTMPComponent(comp,
+                                  g_compCache[i].type,
+                                  g_compCache[i].origMaxVisible,
+                                  g_compCache[i].origTextHandle);
+        syncedCount++;
     }
-    ReleaseSRWLockExclusive(&g_cacheLock);
-
-    for (int i = 0; i < count; i++) {
-        RefreshSingleTMPComponent(&snap[i]);
-    }
-    Log("[HideUID] Live-synced %d active TMP_Text components", count);
+    Log("[HideUID] Live-synced %d active TMP_Text components", syncedCount);
 }
 
 static void CheckWindowHealth(ULONGLONG now) {
@@ -921,30 +1104,51 @@ static void CheckWindowHealth(ULONGLONG now) {
     }
 }
 
+// Pure-C zero-allocation health check on cached watermark handles.
+// Avoids calling il2cpp_runtime_invoke (and boxing booleans on GC heap) every second!
+static int AreSyncedWatermarkHandlesAlive(void) {
+    if (g_uidHidden) {
+        void* uidGo = GetGcHandleTarget(g_uidTextHandle);
+        if (!uidGo || !IsUnityObjectAlive(uidGo)) return 0;
+    }
+    if (g_pingHidden) {
+        void* pingGo = GetGcHandleTarget(g_uidPingHandle);
+        if (!pingGo || !IsUnityObjectAlive(pingGo)) return 0;
+    }
+    return 1;
+}
+
 static void PumpMainThreadSync(void) {
     if (g_hookDisabled) return;
+    if (g_mainThreadId == 0 || GetCurrentThreadId() != g_mainThreadId) return;
     if (GetThreadHookMask() & TLS_BIT_PUMP) return;
 
     ULONGLONG now = GetTickCount64();
     CheckWindowHealth(now);
     if (g_hookDisabled) return;
 
-    if (g_mainThreadId == 0 || GetCurrentThreadId() != g_mainThreadId) return;
-
     LONG curRev = g_configRevision;
     int configJustChanged = (curRev != g_appliedRevision);
 
-    if (!configJustChanged && g_watermarkSynced && now < g_nextWatermarkProbeTick) {
-        return;
-    }
-    if (!configJustChanged && !g_watermarkSynced && now < g_nextWatermarkProbeTick) {
-        return;
+    if (!configJustChanged) {
+        if (now < g_nextWatermarkProbeTick) {
+            return;
+        }
+        if (g_watermarkSynced) {
+            // Steady-state fast path: 0 il2cpp_runtime_invoke calls, 0 GC allocations!
+            if (AreSyncedWatermarkHandlesAlive()) {
+                g_nextWatermarkProbeTick = now + 2000;
+                return;
+            }
+            // Cached watermark GameObject was destroyed (e.g. scene transition) -> re-sync
+            g_watermarkSynced = 0;
+        }
     }
 
     SetThreadHookBit(TLS_BIT_PUMP, 1);
 
     g_appliedRevision = curRev;
-    g_nextWatermarkProbeTick = now + 1000;
+    g_nextWatermarkProbeTick = now + 1500;
 
     // 1. Watermark UID node
     int uidOk = 1;
@@ -952,17 +1156,17 @@ static void PumpMainThreadSync(void) {
         g_uidTouchedByUs = 1;
         uidOk = SetNodeActiveOnMainThread(
             &g_uidTextHandle,
-            "UINode/UIRoot/UIDPanelPanel/Main/TextNode/Text",
-            "UINode/UIRoot/UIDPanelPanel/Main/TextNode",
-            "Text",
+            g_strWatermarkUidFull,
+            g_strWatermarkParent,
+            g_strChildText,
             HT_WATERMARK_UID,
             0, "Watermark UID");
     } else if (configJustChanged || g_uidTouchedByUs || g_uidTextHandle != 0) {
         uidOk = SetNodeActiveOnMainThread(
             &g_uidTextHandle,
-            "UINode/UIRoot/UIDPanelPanel/Main/TextNode/Text",
-            "UINode/UIRoot/UIDPanelPanel/Main/TextNode",
-            "Text",
+            g_strWatermarkUidFull,
+            g_strWatermarkParent,
+            g_strChildText,
             HT_WATERMARK_UID,
             1, "Watermark UID");
         if (uidOk) {
@@ -976,17 +1180,17 @@ static void PumpMainThreadSync(void) {
         g_pingTouchedByUs = 1;
         pingOk = SetNodeActiveOnMainThread(
             &g_uidPingHandle,
-            "UINode/UIRoot/UIDPanelPanel/Main/TextNode/PingCon",
-            "UINode/UIRoot/UIDPanelPanel/Main/TextNode",
-            "PingCon",
+            g_strWatermarkPingFull,
+            g_strWatermarkParent,
+            g_strChildPingCon,
             HT_WATERMARK_PING,
             0, "Watermark Ping");
     } else if (g_pingTouchedByUs) {
         pingOk = SetNodeActiveOnMainThread(
             &g_uidPingHandle,
-            "UINode/UIRoot/UIDPanelPanel/Main/TextNode/PingCon",
-            "UINode/UIRoot/UIDPanelPanel/Main/TextNode",
-            "PingCon",
+            g_strWatermarkPingFull,
+            g_strWatermarkParent,
+            g_strChildPingCon,
             HT_WATERMARK_PING,
             1, "Watermark Ping");
         if (pingOk) {
@@ -1005,7 +1209,7 @@ static void PumpMainThreadSync(void) {
 }
 
 // ============================================================================
-// Shutdown & Frame Hooks
+// Shutdown & Frame Hooks (Strictly Gated to g_mainThreadId at Entry)
 // ============================================================================
 
 static void hkIl2CppShutdown(void) {
@@ -1024,6 +1228,8 @@ static void hkAppQuit(void* methodInfo) {
 
 static void hkEventSystemUpdate(void* self, void* methodInfo) {
     if (!g_hookDisabled &&
+        g_mainThreadId != 0 &&
+        GetCurrentThreadId() == g_mainThreadId &&
         (g_configRevision != g_appliedRevision ||
          !g_watermarkSynced ||
          GetTickCount64() >= g_nextWatermarkProbeTick)) {
@@ -1036,6 +1242,8 @@ static void hkEventSystemUpdate(void* self, void* methodInfo) {
 
 static void hkCanvasWillRender(void* arg0, void* arg1) {
     if (!g_hookDisabled &&
+        g_mainThreadId != 0 &&
+        GetCurrentThreadId() == g_mainThreadId &&
         (g_configRevision != g_appliedRevision ||
          !g_watermarkSynced ||
          GetTickCount64() >= g_nextWatermarkProbeTick)) {
@@ -1052,7 +1260,11 @@ static void hkCanvasWillRender(void* arg0, void* arg1) {
 
 static void hkTMPSetText(void* self, void* value, void* methodInfo) {
     if (!g_origSetText) return;
-    if (g_hookDisabled || (GetThreadHookMask() & TLS_BIT_SETTEXT)) {
+    // Fast lock-free passthrough for any background worker thread
+    if (g_hookDisabled ||
+        g_mainThreadId == 0 ||
+        GetCurrentThreadId() != g_mainThreadId ||
+        (GetThreadHookMask() & TLS_BIT_SETTEXT)) {
         g_origSetText(self, value, methodInfo);
         return;
     }
@@ -1062,8 +1274,9 @@ static void hkTMPSetText(void* self, void* value, void* methodInfo) {
     SetThreadHookBit(TLS_BIT_SETTEXT, 1);
     if (!g_hookDisabled) {
         HideType t = HT_NONE;
-        if (IdentifyTargetComponent(self, &t) && t != HT_NONE) {
-            RecordOriginalCompText(self, value);
+        uintptr_t cachedPtr = 0;
+        if (IdentifyTargetComponent(self, &t, &cachedPtr) && t != HT_NONE) {
+            RecordOriginalCompText(self, cachedPtr, value);
             // Only clobber string if GenerateTextMesh hook is absent; otherwise keep
             // m_text 100% intact so toggling OFF in GUI restores live text immediately!
             if (!g_generateMeshHooked && g_cachedEmptyStr && IsHideActive(t)) {
@@ -1078,7 +1291,11 @@ static void hkTMPSetText(void* self, void* value, void* methodInfo) {
 
 static void hkGenerateTextMesh(void* self, void* methodInfo) {
     if (!g_origGenerateTextMesh) return;
-    if (g_hookDisabled || (GetThreadHookMask() & TLS_BIT_GENMESH)) {
+    // Fast lock-free passthrough for any background worker thread
+    if (g_hookDisabled ||
+        g_mainThreadId == 0 ||
+        GetCurrentThreadId() != g_mainThreadId ||
+        (GetThreadHookMask() & TLS_BIT_GENMESH)) {
         g_origGenerateTextMesh(self, methodInfo);
         return;
     }
@@ -1086,7 +1303,8 @@ static void hkGenerateTextMesh(void* self, void* methodInfo) {
     PumpMainThreadSync();
 
     HideType t = HT_NONE;
-    int isTarget = (!g_hookDisabled && IdentifyTargetComponent(self, &t) && t != HT_NONE);
+    uintptr_t cachedPtr = 0;
+    int isTarget = (!g_hookDisabled && IdentifyTargetComponent(self, &t, &cachedPtr) && t != HT_NONE);
     if (!isTarget || g_offsetMaxVisibleCharacters == (size_t)-1) {
         SetThreadHookBit(TLS_BIT_GENMESH, 1);
         g_origGenerateTextMesh(self, methodInfo);
@@ -1094,28 +1312,35 @@ static void hkGenerateTextMesh(void* self, void* methodInfo) {
         return;
     }
 
-    char* fieldAddr = (char*)self + g_offsetMaxVisibleCharacters;
-    if (!IsValidUserPtr(fieldAddr, sizeof(int))) {
+    // If game logic re-activated the Watermark UID / Ping GameObject (e.g. after a cutscene),
+    // mask its mesh to 0 chars on THIS frame and schedule SetActive(false) for next frame!
+    if ((t == HT_WATERMARK_UID && g_uidHidden) ||
+        (t == HT_WATERMARK_PING && g_pingHidden)) {
+        g_watermarkSynced = 0;
+        g_nextWatermarkProbeTick = 0;
+    }
+
+    int32_t curVal = 0;
+    if (!SafeReadInt32((const char*)self + g_offsetMaxVisibleCharacters, &curVal)) {
         SetThreadHookBit(TLS_BIT_GENMESH, 1);
         g_origGenerateTextMesh(self, methodInfo);
         SetThreadHookBit(TLS_BIT_GENMESH, 0);
         return;
     }
 
-    volatile LONG* field = (volatile LONG*)fieldAddr;
-    LONG curVal = *field;
     if (curVal > 0) {
-        UpdateCachedOrigMaxVisible(self, (int)curVal);
+        UpdateCachedOrigMaxVisible(self, cachedPtr, (int)curVal);
     }
 
     if (IsHideActive(t)) {
-        InterlockedExchange(field, 0);
+        SafeWriteInt32((char*)self + g_offsetMaxVisibleCharacters, 0);
         SetThreadHookBit(TLS_BIT_GENMESH, 1);
         g_origGenerateTextMesh(self, methodInfo);
         SetThreadHookBit(TLS_BIT_GENMESH, 0);
     } else {
         if (curVal <= 0) {
-            InterlockedExchange(field, (LONG)GetCachedOrigMaxVisible(self));
+            SafeWriteInt32((char*)self + g_offsetMaxVisibleCharacters,
+                           (int32_t)GetCachedOrigMaxVisible(self, cachedPtr));
         }
         SetThreadHookBit(TLS_BIT_GENMESH, 1);
         g_origGenerateTextMesh(self, methodInfo);
@@ -1209,6 +1434,7 @@ static int ResolveIL2CppExports(void) {
     R(il2cpp_object_unbox);
     R(il2cpp_string_new);
     R(il2cpp_gchandle_new);
+    R(il2cpp_gchandle_new_weakref);
     R(il2cpp_gchandle_free);
     R(il2cpp_gchandle_get_target);
 #undef R
@@ -1217,7 +1443,7 @@ static int ResolveIL2CppExports(void) {
            p_il2cpp_domain_get_assemblies && p_il2cpp_assembly_get_image &&
            p_il2cpp_class_from_name && p_il2cpp_class_get_method_from_name &&
            p_il2cpp_runtime_invoke && p_il2cpp_string_new &&
-           p_il2cpp_gchandle_new;
+           p_il2cpp_gchandle_new && p_il2cpp_gchandle_get_target;
 }
 
 // ============================================================================
@@ -1627,7 +1853,7 @@ static DWORD WINAPI InitThread(LPVOID unused) {
     g_hLogFile = CreateFileW(g_logPath, GENERIC_WRITE, FILE_SHARE_READ, NULL,
                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 
-    Log("=== EFF-EFMI-Compatibility-Plugin v1.2.0 (Live GUI + 3DMigoto Panel Fix) ===");
+    Log("=== EFF-EFMI-Compatibility-Plugin v1.2.1 (Marathon-Hardened Live GUI + 3DMigoto Fix) ===");
 
     HideUidConfig cfg;
     int hadIni = LoadHideUidConfig(g_iniPath, &cfg);
@@ -1656,21 +1882,23 @@ static DWORD WINAPI InitThread(LPVOID unused) {
 
     TryInstallEffPanelFix();
 
+    DWORD resolvedMainTid = 0;
     for (int attempt = 1; attempt <= 180 && !g_hookDisabled; attempt++) {
         TryInstallEffPanelFix();
         HWND wnd = FindOwnUnityWindow();
         if (wnd && ResolveIL2CppExports()) {
             g_gameHwnd = wnd;
-            g_mainThreadId = GetWindowThreadProcessId(wnd, NULL);
-            Log("[IL2CPP] Ready after %d attempts (hwnd=%p, mainTid=%lu)",
-                attempt, (void*)g_gameHwnd, (unsigned long)g_mainThreadId);
+            resolvedMainTid = GetWindowThreadProcessId(wnd, NULL);
+            Log("[IL2CPP] Ready after %d attempts (hwnd=%p, mainTid=%lu, weakRefApi=%d)",
+                attempt, (void*)g_gameHwnd, (unsigned long)resolvedMainTid,
+                p_il2cpp_gchandle_new_weakref != NULL ? 1 : 0);
             break;
         }
         Sleep(500);
     }
     TryInstallEffPanelFix();
 
-    if (!g_gameHwnd || !g_hGameAssembly || !p_il2cpp_domain_get) {
+    if (!g_gameHwnd || !resolvedMainTid || !g_hGameAssembly || !p_il2cpp_domain_get) {
         Log("[ERROR] Timed out waiting for UnityWndClass / GameAssembly.dll");
         return 1;
     }
@@ -1701,11 +1929,11 @@ static DWORD WINAPI InitThread(LPVOID unused) {
 
     void* goClass = FindClassInAssemblies(asms, asmCount, "UnityEngine", "GameObject");
     if (goClass) {
-        g_methodGameObjectSetActive          = FindMethodInHierarchy(goClass, "SetActive", 1);
-        g_methodGameObjectGetActiveSelf      = FindMethodInHierarchy(goClass, "get_activeSelf", 0);
+        g_methodGameObjectSetActive            = FindMethodInHierarchy(goClass, "SetActive", 1);
+        g_methodGameObjectGetActiveSelf        = FindMethodInHierarchy(goClass, "get_activeSelf", 0);
         g_methodGameObjectGetActiveInHierarchy = FindMethodInHierarchy(goClass, "get_activeInHierarchy", 0);
-        g_methodGameObjectGetTransform       = FindMethodInHierarchy(goClass, "get_transform", 0);
-        g_methodGameObjectFind               = FindMethodInHierarchy(goClass, "Find", 1);
+        g_methodGameObjectGetTransform         = FindMethodInHierarchy(goClass, "get_transform", 0);
+        g_methodGameObjectFind                 = FindMethodInHierarchy(goClass, "Find", 1);
     }
 
     void* compClass = FindClassInAssemblies(asms, asmCount, "UnityEngine", "Component");
@@ -1804,15 +2032,24 @@ static DWORD WINAPI InitThread(LPVOID unused) {
         g_methodForceMeshUpdate2, g_methodForceMeshUpdate0,
         g_methodRebuild, g_methodCanvasRendererSetCull, g_methodTransformFind);
 
-    g_cachedEmptyStr = p_il2cpp_string_new("");
-    if (g_cachedEmptyStr) {
-        g_emptyStrHandle = p_il2cpp_gchandle_new(g_cachedEmptyStr, 1);
-    }
+    // Pre-allocate all static constant strings once so runtime never calls il2cpp_string_new
+    g_emptyStrHandle        = NewPinnedStaticStrHandle("", &g_cachedEmptyStr);
+    g_strWatermarkUidFullH  = NewPinnedStaticStrHandle("UINode/UIRoot/UIDPanelPanel/Main/TextNode/Text", &g_strWatermarkUidFull);
+    g_strWatermarkPingFullH = NewPinnedStaticStrHandle("UINode/UIRoot/UIDPanelPanel/Main/TextNode/PingCon", &g_strWatermarkPingFull);
+    g_strWatermarkParentH   = NewPinnedStaticStrHandle("UINode/UIRoot/UIDPanelPanel/Main/TextNode", &g_strWatermarkParent);
+    g_strChildTextH         = NewPinnedStaticStrHandle("Text", &g_strChildText);
+    g_strChildPingConH      = NewPinnedStaticStrHandle("PingCon", &g_strChildPingCon);
 
     if (attachedThread && p_il2cpp_thread_detach) {
         p_il2cpp_thread_detach(attachedThread);
         attachedThread = NULL;
     }
+
+    // Publish g_mainThreadId AFTER all IL2CPP metadata & static strings are ready,
+    // right before arming MinHook trampolines.
+    MemoryBarrier();
+    g_mainThreadId = resolvedMainTid;
+    MemoryBarrier();
 
     MH_STATUS mhInit = MH_Initialize();
     if (mhInit != MH_OK && mhInit != MH_ERROR_ALREADY_INITIALIZED) {
@@ -1881,7 +2118,7 @@ static DWORD WINAPI InitThread(LPVOID unused) {
         }
     }
 
-    Log("[Ready] All active hooks & pure-Win32 GUI panel armed.");
+    Log("[Ready] All active hooks & pure-Win32 GUI panel armed (marathon-hardened v1.2.1).");
     return 0;
 }
 

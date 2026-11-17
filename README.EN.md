@@ -1,4 +1,4 @@
-# EFF-EFMI-Compatibility-Plugin v1.2.0
+# EFF-EFMI-Compatibility-Plugin v1.2.1
 
 🌐 **[中文说明文档 (README.md)](./README.md)**
 
@@ -7,8 +7,11 @@
 
 ---
 
-## ✨ What's New in v1.2.0
+## ✨ What's New in v1.2.1
 
+- **🛡️ Marathon-Session Stability Fix (`v1.2.1` Critical Update)**:
+  - **Fixes Long-Session `0xC0000005` Crash**: Eliminated dangling pointer dereferences during `g_seenTable` bucket eviction after Boehm GC unmaps old `4 KB` UI pages, switched `g_compCache` to **`il2cpp_gchandle_new_weakref` weak handles** (allowing Unity GC to freely collect closed UI panels), and protected all memory reads/writes with **hardware `__try / __except` SEH + `VirtualQuery` `MEM_COMMIT` validation**.
+  - **Eliminates Lock Contention & Idle GC Churn**: Strictly gates all IL2CPP hooks to `g_mainThreadId` at entry (removing cross-thread locks that could deadlock with Boehm GC `SuspendThread`), removes synchronous `FlushFileBuffers` disk barriers, and pre-pins static lookup strings so multi-hour idle gameplay incurs **zero `il2cpp_runtime_invoke` calls and zero GC heap allocations**.
 - **🎛️ Built-in `HOME` GUI Control Panel (Zero DX11 / Zero SwapChain / Zero Conflict)**:
   - Rendered purely with **Win32 + DWM Dark Rounded Window + 32-bit DIB subpixel SDF rasterization** — **zero DirectX 11, zero DXGI SwapChain, and zero `UnityWndClass` `WndProc` hooks**.
   - Physically **impossible to pollute 3DMigoto's `res_width` / `res_height`** (keeping in-game Mod GUI Menus at 100% native scale), and coexists side-by-side with EFF's **`Ins` Control Panel** without input or overlay conflicts.

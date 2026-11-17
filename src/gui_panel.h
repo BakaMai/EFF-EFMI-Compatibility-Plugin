@@ -576,7 +576,7 @@ static void RenderPanel(HWND hwnd, HDC outDc) {
     RECT rcSub = { ScalePx(20, L.dpi), ScalePx(36, L.dpi), L.btnLang.left - ScalePx(8, L.dpi), ScalePx(54, L.dpi) };
     SetTextColor(memDc, RGB(114, 168, 214));
     DrawTextW(memDc,
-              en ? L"EFF \u00B7 EFMI Coexistence Bridge v1.2" : L"EFF \u00B7 EFMI \u517C\u5BB9\u6865\u63A5\u63D2\u4EF6 v1.2",
+              en ? L"EFF \u00B7 EFMI Coexistence Bridge v1.2.1" : L"EFF \u00B7 EFMI \u517C\u5BB9\u6865\u63A5\u63D2\u4EF6 v1.2.1",
               -1, &rcSub, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
     // Lang & Close button labels
